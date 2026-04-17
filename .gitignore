@@ -1,0 +1,145 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+pip-wheel-metadata/
+
+# Тесты и покрытие
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+nosetests.xml
+test-results/
+
+# Типизация
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+.pyre/
+
+# Виртуальное окружение
+venv/
+ENV/
+env/
+.venv
+.env.bak
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+desktop.ini
+*.iml
+
+# Окружение
+.env
+.env.local
+.env.*.local
+
+# База данных
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+*.dump
+*.sql.gz
+
+# Логи
+*.log
+logs/
+*.pid
+
+# Кэш
+.cache/
+*.cache
+__pycache__/
+.hypothesis/
+.benchmarks/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Profiling
+*.prof
+*.lprof
+
+# Скачанные медиафайлы (кэш yt-dlp)
+downloads/
+*.part
+*.ytdl
+
+# Медиафайлы
+*.mp3
+*.m4a
+*.webm
+*.opus
+*.ogg
+*.mp4
+*.flac
+*.wav
+*.aac
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Временные файлы
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Игнорировать всё вне Omni-Player-DEV-main
+/*
+!/Omni-Player-DEV-main/
+!.gitignore
+# Системные каталоги пользователя
+/.DS_Store
+/.Trash/
+/.cache/
+/.local/
+/.npm/
+/.nuget/
+/.config/
+/.ServiceHub/
+/.cagent/
+/.copilot/
+/.dbclient/
+/.docker/
+/.dotnet/
+/.gk/
+/.lesshst
+/.parsec/
+/.pgadmin/
+/.psql_history
