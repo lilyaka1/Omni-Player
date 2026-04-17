@@ -1,0 +1,30 @@
+  <div class="live-page">
+    <div class="glass glass-primary live-card">
+      <div class="live-card-tools">
+        <button class="btn btn-icon glass-tertiary" id="themeToggle" title="Переключить тему" style="width:38px;height:38px;font-size:0.9rem;">
+          <i class="fa-solid fa-moon" id="themeIcon"></i>
+        </button>
+      </div>
+      <div class="live-status"><div class="live-dot"></div> LIVE</div>
+      <h1>Live-стриминг</h1>
+      <p>Эта страница предназначена для управления живым аудиопотоком комнаты.</p>
+
+      <div id="liveControls">
+        <p class="text-sm text-muted" style="margin-bottom:16px;">Room ID: <strong id="liveRoomId">—</strong></p>
+        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+          <button class="btn btn-accent" id="startBtn">
+            <i class="fa-solid fa-broadcast-tower"></i> Начать трансляцию
+          </button>
+          <button class="btn" id="stopBtn" style="display:none;">
+            <i class="fa-solid fa-stop"></i> Остановить
+          </button>
+        </div>
+        <p class="room-id-hint" id="liveStatus">Статус: не активно</p>
+      </div>
+
+      <div style="margin-top:24px;">
+        <a href="/" class="btn"><i class="fa-solid fa-arrow-left"></i> На главную</a>
+      </div>
+    </div>
+  </div>
+

@@ -1,0 +1,47 @@
+  <div id="toast-container"></div>
+
+  <div class="profile-page">
+    <div class="glass glass-primary profile-card">
+      <div class="profile-card-tools">
+        <button class="btn btn-icon glass-tertiary" id="themeToggle" title="Переключить тему" style="width:38px;height:38px;font-size:0.9rem;">
+          <i class="fa-solid fa-moon" id="themeIcon"></i>
+        </button>
+      </div>
+      <div class="profile-avatar" id="profileAvatar">?</div>
+      <div class="profile-name" id="profileName">Загрузка...</div>
+      <div class="profile-email" id="profileEmail"></div>
+      <div class="profile-badges" id="profileBadges"></div>
+
+      <div id="profileStats">
+        <div class="profile-stat">
+          <span class="label">ID пользователя</span>
+          <span class="value" id="profileId">—</span>
+        </div>
+        <div class="profile-stat">
+          <span class="label">Имя пользователя</span>
+          <span class="value" id="profileUsername">—</span>
+        </div>
+        <div class="profile-stat">
+          <span class="label">Роль</span>
+          <span class="value" id="profileRole">—</span>
+        </div>
+        <div class="profile-stat">
+          <span class="label">Может создавать комнаты</span>
+          <span class="value" id="profileCanCreate">—</span>
+        </div>
+      </div>
+
+      <div class="profile-actions">
+        <button class="btn" onclick="window.location.href='/'">
+          <i class="fa-solid fa-door-open"></i> Комнаты
+        </button>
+        <button class="btn" onclick="window.location.href='/player'">
+          <i class="fa-solid fa-music"></i> Моя коллекция
+        </button>
+        <button class="btn" id="logoutBtn" style="color:#ff5050;border-color:rgba(255,80,80,0.3);">
+          <i class="fa-solid fa-right-from-bracket"></i> Выйти
+        </button>
+      </div>
+    </div>
+  </div>
+

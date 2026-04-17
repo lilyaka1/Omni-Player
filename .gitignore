@@ -119,27 +119,3 @@ downloads/
 *.temp
 *.bak
 *.orig
-
-# Игнорировать всё вне Omni-Player-DEV-main
-/*
-!/Omni-Player-DEV-main/
-!.gitignore
-# Системные каталоги пользователя
-/.DS_Store
-/.Trash/
-/.cache/
-/.local/
-/.npm/
-/.nuget/
-/.config/
-/.ServiceHub/
-/.cagent/
-/.copilot/
-/.dbclient/
-/.docker/
-/.dotnet/
-/.gk/
-/.lesshst
-/.parsec/
-/.pgadmin/
-/.psql_history

@@ -1,0 +1,100 @@
+  <div id="toast-container"></div>
+
+  <div class="library-layout">
+    <!-- Sidebar -->
+    <aside class="sidebar glass glass-secondary">
+      <div class="sidebar-logo">
+        <div class="logo-icon"><i class="fa-solid fa-circle-play"></i></div>
+        <span>Omniplayer</span>
+      </div>
+      <nav>
+        <button class="nav-item" onclick="window.location.href='/'">
+          <i class="fa-solid fa-door-open"></i> Комнаты
+        </button>
+        <button class="nav-item active">
+          <i class="fa-solid fa-music"></i> Моя коллекция
+        </button>
+        <button class="nav-item" id="themeToggle">
+          <i class="fa-solid fa-moon" id="themeIcon"></i> Тема
+        </button>
+      </nav>
+    </aside>
+
+    <!-- Main -->
+    <main class="library-main">
+      <div class="page-header">
+        <div>
+          <h2>Моя коллекция</h2>
+          <p class="text-sm text-muted" style="margin-top:2px;">Сохранённые треки и поиск</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn" id="addLocalBtn">
+            <i class="fa-solid fa-file-audio"></i> Загрузить файл
+          </button>
+          <button class="btn" id="addToLibBtn">
+            <i class="fa-solid fa-plus"></i> Добавить по ссылке
+          </button>
+        </div>
+      </div>
+
+      <input type="file" id="localFileInput" accept="audio/*" multiple style="display:none;" />
+
+      <!-- Search section -->
+      <div class="search-section glass glass-secondary">
+        <div class="search-bar-row">
+          <input class="input" type="text" id="searchInput" placeholder="Поиск YouTube / SoundCloud..." />
+          <button class="btn btn-accent" id="searchBtn">
+            <i class="fa-solid fa-magnifying-glass"></i> Найти
+          </button>
+        </div>
+        <div class="search-tabs">
+          <button class="search-tab glass-tertiary active" data-src="youtube">
+            <i class="fa-brands fa-youtube"></i> YouTube
+          </button>
+          <button class="search-tab glass-tertiary" data-src="soundcloud">
+            <i class="fa-brands fa-soundcloud"></i> SoundCloud
+          </button>
+        </div>
+        <div id="searchResults" class="search-results"></div>
+      </div>
+
+      <!-- Library -->
+      <div class="section-panel glass glass-secondary">
+        <div class="section-panel-header">
+          <div class="section-panel-title">
+            <i class="fa-solid fa-bookmark"></i> Сохранённые треки
+          </div>
+          <span class="badge glass-flat" id="libCount">0</span>
+        </div>
+        <div class="track-list" id="libraryList">
+          <div class="empty-state">
+            <i class="fa-solid fa-music"></i>
+            <p>Библиотека пуста</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-panel glass glass-secondary" style="padding:14px;">
+        <div class="section-panel-title" style="margin-bottom:8px;">
+          <i class="fa-solid fa-headphones"></i> Локальное прослушивание
+        </div>
+        <audio id="localPreviewAudio" controls style="width:100%;"></audio>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add by URL modal -->
+  <div id="addUrlModal" style="
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,0.4);
+    backdrop-filter:blur(4px); z-index:1000; align-items:center; justify-content:center;
+  ">
+    <div class="glass glass-primary" style="width:100%;max-width:420px;padding:32px;margin:20px;">
+      <h3 style="margin-bottom:18px;font-size:1rem;font-weight:700;">Добавить трек</h3>
+      <input class="input" type="url" id="addUrlInput" placeholder="https://www.youtube.com/..." style="margin-bottom:14px;" />
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-accent w-full" id="addUrlConfirm">Добавить</button>
+        <button class="btn w-full" id="addUrlCancel">Отмена</button>
+      </div>
+    </div>
+  </div>
+

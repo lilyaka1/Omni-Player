@@ -1,0 +1,196 @@
+  <!-- Toast container -->
+  <div id="toast-container"></div>
+
+  <div class="app-shell">
+    <!-- Sidebar -->
+    <aside class="sidebar glass glass-primary">
+      <div class="sidebar-logo">
+        <div class="logo-icon"><i class="fa-solid fa-circle-play"></i></div>
+        <span>Omniplayer</span>
+      </div>
+
+      <nav>
+        <div class="nav-section-label">Главное</div>
+        <button class="nav-item active" data-page="home">
+          <i class="fa-solid fa-house"></i> Главная
+        </button>
+        <button class="nav-item" data-page="search">
+          <i class="fa-solid fa-magnifying-glass"></i> Поиск
+        </button>
+
+        <div class="nav-section-label">Каталог</div>
+        <button class="nav-item" data-page="rooms">
+          <i class="fa-solid fa-door-open"></i> Комнаты
+          <span class="count-badge glass-flat" id="roomsCountBadge" style="display:none"></span>
+        </button>
+        <button class="nav-item" data-page="genres">
+          <i class="fa-solid fa-layer-group"></i> Жанры
+        </button>
+        <button class="nav-item" onclick="window.location.href='/player'">
+          <i class="fa-solid fa-bookmark"></i> Коллекция
+        </button>
+
+        <div id="myRoomsSection" style="display:none">
+          <div class="sidebar-divider"></div>
+          <div class="nav-section-label">Мои комнаты</div>
+          <div id="myRoomsList"></div>
+        </div>
+      </nav>
+
+      <div class="sidebar-divider"></div>
+      <button class="nav-item" id="themeToggle">
+        <i class="fa-solid fa-moon" id="themeIcon"></i>
+        Тема
+      </button>
+
+      <div class="sidebar-footer">
+        <div class="user-card" id="userCard" style="display:none">
+          <div class="user-avatar" id="userAvatarLetter">?</div>
+          <div class="user-info">
+            <div class="name" id="sidebarUsername">—</div>
+            <div class="role" id="sidebarRole">Гость</div>
+          </div>
+          <button class="logout-btn" id="logoutBtn" title="Выйти">
+            <i class="fa-solid fa-right-from-bracket"></i>
+          </button>
+        </div>
+        <button class="nav-item" id="loginNavBtn" style="display:none" onclick="window.location.href='/login'">
+          <i class="fa-solid fa-right-to-bracket"></i> Войти
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main -->
+    <main class="main-content">
+
+      <!-- PAGE: HOME -->
+      <div id="pageHome" class="page-section active">
+        <div class="page-header">
+          <div>
+            <h2 id="greetingText">Добрый день 👋</h2>
+            <p class="sub">Что будем слушать сегодня?</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-accent" id="createRoomBtn" style="display:none">
+              <i class="fa-solid fa-plus"></i> Комната
+            </button>
+          </div>
+        </div>
+
+        <div class="featured-banner" onclick="switchPage('rooms')">
+          <div class="fb-bg" style="background:linear-gradient(135deg,#6c63ff 0%,#a855f7 55%,#ec4899 100%);"></div>
+          <div class="fb-overlay"></div>
+          <div class="fb-content">
+            <div class="fb-tag">Популярное сейчас</div>
+            <h2>Комнаты онлайн</h2>
+            <div class="fb-sub" id="featuredSub">Загрузка...</div>
+          </div>
+          <button class="fb-play" onclick="event.stopPropagation();switchPage('rooms')">
+            <i class="fa-solid fa-arrow-right"></i>
+          </button>
+        </div>
+
+        <div style="margin-bottom:28px;">
+          <div class="sec-header">
+            <span class="sec-title">Активные комнаты</span>
+            <button class="sec-link" onclick="switchPage('rooms')">Смотреть все →</button>
+          </div>
+          <div class="h-strip" id="homeRoomsStrip">
+            <div style="color:var(--text-muted);font-size:0.82rem;padding:20px 0;">Загрузка...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE: ROOMS -->
+      <div id="pageRooms" class="page-section">
+        <div class="page-header">
+          <div>
+            <h2>Комнаты</h2>
+            <p class="sub">Слушай музыку вместе</p>
+          </div>
+          <div class="header-actions">
+            <div class="search-bar">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input class="input" type="text" id="roomSearch" placeholder="Поиск комнат..." />
+            </div>
+            <button class="btn btn-accent" id="createRoomBtn2" style="display:none">
+              <i class="fa-solid fa-plus"></i> Создать
+            </button>
+          </div>
+        </div>
+        <div class="rooms-grid" id="roomsGrid">
+          <div style="grid-column:1/-1;display:flex;align-items:center;justify-content:center;padding:60px;">
+            <div class="spinner" style="width:32px;height:32px;border-width:3px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE: SEARCH -->
+      <div id="pageSearch" class="page-section">
+        <div class="page-header">
+          <div><h2>Поиск</h2><p class="sub">YouTube и SoundCloud</p></div>
+        </div>
+        <div class="search-main-wrap">
+          <div class="search-input-row">
+            <input class="input" type="text" id="searchInput" placeholder="Название трека или артист..." />
+            <button class="btn btn-accent" id="searchBtn">
+              <i class="fa-solid fa-magnifying-glass"></i> Найти
+            </button>
+          </div>
+          <div class="search-src-tabs">
+            <button class="src-tab glass-tertiary active" data-src="youtube"><i class="fa-brands fa-youtube"></i> YouTube</button>
+            <button class="src-tab glass-tertiary" data-src="soundcloud"><i class="fa-brands fa-soundcloud"></i> SoundCloud</button>
+          </div>
+          <div class="search-results-list" id="searchResults">
+            <div class="empty-state"><i class="fa-solid fa-magnifying-glass"></i><p>Введите запрос для поиска</p></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PAGE: GENRES -->
+      <div id="pageGenres" class="page-section">
+        <div class="page-header">
+          <div><h2>Жанры</h2><p class="sub">Выбери своё настроение</p></div>
+        </div>
+        <div class="genres-grid" id="genresGrid"></div>
+        <div id="genreRoomsBlock" style="display:none;">
+          <div class="sec-header">
+            <span class="sec-title" id="genreRoomsTitle">Комнаты</span>
+            <button class="sec-link" onclick="hideGenreRooms()">← Назад к жанрам</button>
+          </div>
+          <div class="rooms-grid" id="genreRoomsGrid"></div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- Create room modal -->
+  <div class="modal-overlay" id="createRoomModal">
+    <div class="modal glass glass-primary">
+      <div class="modal-header">
+        <h3>Создать комнату</h3>
+        <button class="modal-close" id="closeModal"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <form class="modal-form" id="createRoomForm">
+        <div class="form-group" style="display:flex;flex-direction:column;gap:6px;">
+          <label style="font-size:0.8rem;font-weight:500;color:var(--text-secondary);">Название *</label>
+          <input class="input" type="text" id="newRoomName" placeholder="Моя комната" required maxlength="80" />
+        </div>
+        <div class="form-group" style="display:flex;flex-direction:column;gap:6px;">
+          <label style="font-size:0.8rem;font-weight:500;color:var(--text-secondary);">Описание</label>
+          <input class="input" type="text" id="newRoomDesc" placeholder="Необязательно" maxlength="200" />
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;padding:10px 0;">
+          <input type="checkbox" id="newRoomPublic" checked style="width:16px;height:16px;accent-color:var(--accent);" />
+          <label for="newRoomPublic" style="font-size:0.875rem;color:var(--text-secondary);cursor:pointer;">
+            Публичная комната
+          </label>
+        </div>
+        <button type="submit" class="btn btn-accent w-full" style="padding:13px;font-size:0.95rem;font-weight:600;">
+          Создать комнату
+        </button>
+      </form>
+    </div>
+  </div>
+

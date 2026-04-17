@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Omni Player</title>
+<link rel="stylesheet" href="/static/css/main.css">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+#loginOverlay { position: fixed; inset: 0; background: #1a1a2e; display: flex; align-items: center; justify-content: center; z-index: 100; }
+.login-box { background: #16213e; padding: 40px; border-radius: 12px; width: 320px; }
+.login-box h2 { text-align:center; margin-bottom:24px; color:#e94560; }
+.login-box input { width:100%; padding:10px; margin-bottom:12px; background:#0f3460; border:none; border-radius:6px; color:#eee; font-size:14px; }
+.login-box .btn-login { width:100%; padding:12px; background:#e94560; border:none; border-radius:6px; color:#fff; font-size:16px; cursor:pointer; }
+#loginError { color:#e94560; font-size:13px; margin-top:8px; display:none; }
+header { background:#16213e; padding:12px 20px; display:flex; align-items:center; gap:16px; border-bottom:1px solid #0f3460; flex-shrink:0; }
+header h1 { font-size:18px; color:#e94560; flex:1; }
+#userInfo { font-size:13px; color:#aaa; }
+#logoutBtn { padding:6px 14px; background:#e94560; border:none; border-radius:4px; color:#fff; cursor:pointer; font-size:13px; }
+main { display:flex; flex-direction:column; flex:1; min-height:0; overflow:auto; }
+.sec { padding:16px; border-bottom:1px solid #0f3460; background:#16213e; flex-shrink:0; }
+.sec h3 { font-size:12px; color:#888; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
+select, .inp { width:100%; padding:8px 10px; background:#0f3460; border:1px solid #1a4f90; border-radius:6px; color:#eee; font-size:14px; outline:none; }
+.btn { padding:8px 16px; border:none; border-radius:6px; cursor:pointer; font-size:14px; font-weight:500; }
+.btn-red { background:#e94560; color:#fff; }
+.btn-red:hover { background:#c73652; }
+.btn-green { background:#27ae60; color:#fff; }
+.btn-row { display:flex; gap:8px; margin-top:8px; }
+.player { background:#16213e; padding:20px 24px; display:flex; flex-direction:column; align-items:center; border-bottom:1px solid #0f3460; flex-shrink:0; }
+#nowCover { width:120px; height:120px; border-radius:10px; object-fit:cover; margin-bottom:14px; box-shadow:0 4px 20px rgba(0,0,0,.5); display:none; }
+#nowCoverPlaceholder { width:120px; height:120px; border-radius:10px; background:#0f3460; display:flex; align-items:center; justify-content:center; font-size:40px; margin-bottom:14px; }
+#nowTitle { font-size:20px; font-weight:bold; text-align:center; }
+#nowArtist { color:#aaa; font-size:14px; margin-top:5px; text-align:center; }
+#nowGenre { color:#e94560; font-size:11px; margin-top:4px; text-align:center; text-transform:uppercase; letter-spacing:.5px; }
+#statusDot { margin-top:12px; font-size:13px; }
+.live-dot { color:#e94560; font-weight:bold; }
+.offline-dot { color:#888; }
+.player-controls { display:flex; gap:12px; margin-top:16px; }
+.player-controls .btn { padding:10px 24px; font-size:15px; }
+.queue-list { flex:1; overflow-y:auto; padding:12px; }
+.qi { padding:10px 14px; border-radius:6px; background:#16213e; margin-bottom:8px; border:1px solid transparent; }
+.qi.playing { border-color:#e94560; }
+.qi .qt { font-size:14px; font-weight:500; }
+.qi .qa { font-size:12px; color:#aaa; margin-top:2px; }
+.chat { height:180px; border-top:1px solid #0f3460; display:flex; flex-direction:column; flex-shrink:0; }
+#chatMsgs { flex:1; overflow-y:auto; padding:10px; font-size:13px; }
+.cm .cu { color:#e94560; font-weight:bold; }
+.chat-row { display:flex; border-top:1px solid #0f3460; }
+.chat-row .inp { flex:1; border-radius:0; border:none; border-right:1px solid #0f3460; }
+.chat-row button { padding:8px 16px; background:#e94560; border:none; color:#fff; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>Omni Player</h2>
+    <input type="text" id="loginUser" placeholder="Username" value="testuser">
+    <input type="password" id="loginPass" placeholder="Password" value="password">
+    <button class="btn-login" onclick="doLogin()">Войти</button>
+    <div id="loginError"></div>
+  </div>
+</div>
+
+<header>
+  <h1>Omni Player</h1>
+  <span id="userInfo"></span>
+  <button id="logoutBtn" onclick="doLogout()" style="display:none">Выйти</button>
+</header>
+
+<main>
+  <div class="sec">
+    <h3>Комната</h3>
+    <select id="roomSelect"><option value="">— выберите —</option></select>
+    <div class="btn-row">
+      <button class="btn btn-red" style="flex:1" onclick="doConnect()">Подключиться</button>
+    </div>
+    <div id="roomStatus" style="font-size:12px;color:#888;margin-top:8px">Не подключены</div>
+  </div>
+
+  <div class="player">
+    <img id="nowCover" src="" alt="">
+    <div id="nowCoverPlaceholder">🎵</div>
+    <div id="nowTitle">Ничего не играет</div>
+    <div id="nowArtist">—</div>
+    <div id="nowGenre"></div>
+    <div id="statusDot"><span class="offline-dot">&#9679; Не в эфире</span></div>
+    <div id="playPrompt" onclick="onPlayPromptClick()" style="display:none;margin-top:8px;padding:8px 16px;background:#e94560;border-radius:6px;cursor:pointer;text-align:center;font-size:13px">&#9654; Нажмите для воспроизведения</div>
+    <div class="player-controls">
+      <button class="btn btn-green" onclick="doListen()">&#9654; Слушать</button>
+      <button class="btn btn-red" onclick="doStop()">&#9646;&#9646; Стоп</button>
+    </div>
+  </div>
+
+  <div style="padding:8px 12px;font-size:12px;color:#888;border-bottom:1px solid #0f3460;background:#16213e;flex-shrink:0">
+    Очередь
+  </div>
+
+  <button id="eqToggleBtn" style="padding:10px 12px;font-size:13px;color:#eee;border:none;border-bottom:1px solid #0f3460;background:#16213e;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;cursor:pointer;width:100%;text-align:left;transition:background 0.2s" onmouseover="this.style.background='#1a2a4e'" onmouseout="this.style.background='#16213e'" onclick="var c=document.getElementById('eqPanel');var open=c.style.display!=='none';c.style.display=open?'none':'block';this.querySelector('span').textContent=open?'▶ Эквалайзер':'▼ Эквалайзер'">
+    <span>▶ Эквалайзер</span>
+    <span style="font-size:11px;color:#666">🎚️</span>
+  </button>
+  <div id="eqPanel" style="display:none;flex-shrink:0;background:#16213e">
+    <div class="equalizer-container" style="margin:0;border-radius:0;border-left:none;border-right:none">
+      <div class="equalizer-title" style="margin-bottom:10px">Эквалайзер</div>
+      <div class="bands-container" id="equalizerBands"></div>
+    </div>
+  </div>
+
+  <div class="queue-list" id="queueList">
+    <div style="text-align:center;color:#555;padding:20px;font-size:13px">Не подключены</div>
+  </div>
+
+  <div class="chat">
+    <div id="chatMsgs"></div>
+    <div class="chat-row">
+      <input class="inp" type="text" id="chatText" placeholder="Сообщение..."
+             onkeydown="if(event.key==='Enter')sendChat()">
+      <button onclick="sendChat()">&#8594;</button>
+    </div>
+  </div>
+</main>
+
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/room/equalizer.js"></script>
+<script src="/static/js/room/equalizer-ui.js"></script>
+<script src="/static/js/room/globals.js"></script>
+<script src="/static/js/room/auth-ui.js"></script>
+<script src="/static/js/room/queue.js"></script>
+<script src="/static/js/room/stream.js"></script>
+<script src="/static/js/room/websocket.js"></script>
+<script src="/static/js/room/chat.js"></script>
+<script src="/static/js/room/player.js"></script>
+</body>
+</html>

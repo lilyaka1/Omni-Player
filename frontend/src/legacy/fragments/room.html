@@ -1,0 +1,195 @@
+  <!-- Toast container -->
+  <div id="toast-container"></div>
+
+  <!-- Top bar -->
+  <div class="room-topbar glass glass-secondary glass-refract">
+    <button class="topbar-back glass-tertiary" onclick="window.location.href='/'">
+      <i class="fa-solid fa-arrow-left"></i>
+    </button>
+    <div class="topbar-title" id="roomNameTitle">Загрузка...</div>
+    <div class="topbar-online">
+      <div class="online-dot"></div>
+      <span id="onlineCount">0</span> online
+    </div>
+    <button class="eq-toggle-btn glass-tertiary" id="eqToggleBtn">
+      <i class="fa-solid fa-sliders"></i> EQ
+    </button>
+    <button class="topbar-back glass-tertiary" id="themeToggle" title="Переключить тему">
+      <i class="fa-solid fa-moon" id="themeIcon"></i>
+    </button>
+  </div>
+
+  <!-- Main grid -->
+  <div class="room-layout">
+
+    <!-- Left column: player + iPod -->
+    <div class="room-left">
+
+      <!-- Player card -->
+      <div class="glass glass-primary player-card">
+        <!-- Artwork -->
+        <div class="artwork-container" id="artworkContainer">
+          <div class="artwork-img" id="artworkBox">
+            <div class="artwork-placeholder-icon">
+              <i class="fa-solid fa-music"></i>
+            </div>
+          </div>
+        </div>
+
+        <!-- Track info -->
+        <div class="track-info">
+          <div class="track-title" id="trackTitle">Нет треков в очереди</div>
+          <div class="track-artist text-secondary" id="trackArtist">—</div>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-section" style="width:100%;max-width:380px;">
+          <div class="progress-times">
+            <span id="timeCurrent">0:00</span>
+            <span id="timeDuration">0:00</span>
+          </div>
+          <div class="progress-bar-wrap" id="progressWrap">
+            <div class="progress-bar-fill" id="progressFill" style="width:0%"></div>
+          </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+          <button class="ctrl-btn ctrl-btn-sm" id="btnPrev" title="Предыдущий">
+            <i class="fa-solid fa-backward-step"></i>
+          </button>
+          <button class="ctrl-btn ctrl-btn-md" id="btnSeekBack" title="-10с">
+            <i class="fa-solid fa-rotate-left"></i>
+          </button>
+          <button class="ctrl-btn ctrl-btn-lg" id="btnPlayPause">
+            <i class="fa-solid fa-play" id="playIcon"></i>
+          </button>
+          <button class="ctrl-btn ctrl-btn-md" id="btnSeekFwd" title="+10с">
+            <i class="fa-solid fa-rotate-right"></i>
+          </button>
+          <button class="ctrl-btn ctrl-btn-sm" id="btnNext" title="Следующий">
+            <i class="fa-solid fa-forward-step"></i>
+          </button>
+        </div>
+
+        <!-- Volume -->
+        <div class="volume-row" style="max-width:280px;width:100%;">
+          <i class="fa-solid fa-volume-low"></i>
+          <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="80" />
+          <i class="fa-solid fa-volume-high"></i>
+        </div>
+      </div>
+
+      <!-- CoverFlow Queue Browser -->
+      <div class="glass glass-secondary coverflow-section" id="coverflowSection">
+
+        <!-- 3D cover stage -->
+        <div class="coverflow-stage-wrap">
+          <div class="coverflow-stage" id="coverflowStage">
+            <div class="cf-cover" data-pos="0">
+              <div class="cf-cover-img"><i class="fa-solid fa-music"></i></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Track label -->
+        <div class="cf-info">
+          <div class="cf-title" id="cfTitle">Нет треков в очереди</div>
+          <div class="cf-artist" id="cfArtist">Добавьте треки →</div>
+        </div>
+
+
+      </div>
+
+    </div>
+
+    <!-- Right column -->
+    <div class="room-right">
+
+      <!-- Queue panel -->
+      <div class="glass glass-secondary queue-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <i class="fa-solid fa-list-music"></i>
+            Очередь
+          </div>
+          <button class="btn btn-icon glass-tertiary" title="Очистить очередь" id="clearQueueBtn" style="width:30px;height:30px;font-size:0.75rem;">
+            <i class="fa-solid fa-trash-can"></i>
+          </button>
+        </div>
+
+        <div class="queue-list" id="queueList">
+          <div class="empty-state">
+            <i class="fa-solid fa-music"></i>
+            <p>Очередь пуста</p>
+          </div>
+        </div>
+
+        <div class="add-track-row">
+          <input class="input" type="text" id="addTrackUrl" placeholder="Вставьте ссылку YouTube/SoundCloud" />
+          <button class="btn btn-accent" id="addTrackBtn">
+            <i class="fa-solid fa-plus"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Chat panel -->
+      <div class="glass glass-secondary chat-panel">
+        <div class="panel-header" style="margin-bottom:10px;">
+          <div class="panel-title">
+            <i class="fa-solid fa-comments"></i>
+            Чат комнаты
+          </div>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+          <div class="empty-state" style="padding:20px;">
+            <i class="fa-solid fa-comments"></i>
+            <p>Начните разговор</p>
+          </div>
+        </div>
+
+        <div class="chat-input-row">
+          <input class="input" type="text" id="chatInput" placeholder="Сообщение..." maxlength="500" />
+          <button class="btn btn-accent btn-icon" id="chatSendBtn" title="Отправить">
+            <i class="fa-solid fa-paper-plane"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- Listeners panel -->
+      <div class="glass glass-secondary listeners-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            <i class="fa-solid fa-headphones"></i>
+            Слушатели
+          </div>
+          <span class="badge glass-tertiary" id="listenersBadge">0 online</span>
+        </div>
+        <div class="listeners-list" id="listenersList">
+          <div class="empty-state" style="padding:10px;">
+            <i class="fa-solid fa-user-slash"></i>
+            <p>Нет слушателей</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Room info bar -->
+      <div class="glass glass-secondary room-info-bar" id="roomInfoBar">
+        <div class="info-pill glass-tertiary"><i class="fa-solid fa-crown"></i> <span id="infoHost">—</span></div>
+        <div class="info-pill glass-tertiary"><i class="fa-solid fa-globe"></i> <span id="infoPrivacy">—</span></div>
+        <div class="info-pill glass-tertiary"><i class="fa-solid fa-headphones"></i> <span id="infoListeners">0</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Equalizer panel (hidden overlay) -->
+  <div id="eqPanel" style="display:none; position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:500; padding:20px 24px; min-width:360px;">
+    <!-- rendered by equalizer-ui.js -->
+  </div>
+
+  <!-- Hidden audio element -->
+  <audio id="audioPlayer" preload="none"></audio>
+
+  <!-- JS modules (order matters: globals first) -->

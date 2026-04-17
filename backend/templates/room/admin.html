@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Admin — Omni Player</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; height: 100vh; display: flex; flex-direction: column; }
+#loginOverlay { position: fixed; inset: 0; background: #1a1a2e; display: flex; align-items: center; justify-content: center; z-index: 100; }
+.login-box { background: #16213e; padding: 40px; border-radius: 12px; width: 320px; }
+.login-box h2 { text-align: center; margin-bottom: 24px; color: #e94560; }
+.login-box input { width: 100%; padding: 10px; margin-bottom: 12px; background: #0f3460; border: none; border-radius: 6px; color: #eee; font-size: 14px; }
+.login-box .btn-login { width: 100%; padding: 12px; background: #e94560; border: none; border-radius: 6px; color: #fff; font-size: 16px; cursor: pointer; }
+#loginError { color: #e94560; font-size: 13px; margin-top: 8px; display: none; }
+header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+header h1 { font-size: 18px; color: #e94560; flex: 1; }
+#userInfo { font-size: 13px; color: #aaa; }
+#logoutBtn { padding: 6px 14px; background: #e94560; border: none; border-radius: 4px; color: #fff; cursor: pointer; font-size: 13px; }
+main { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; overflow: auto; }
+.left { background: #16213e; border-right: 1px solid #0f3460; display: flex; flex-direction: column; overflow-y: auto; }
+.sec { padding: 16px; border-bottom: 1px solid #0f3460; }
+.sec h3 { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+select, .inp { width: 100%; padding: 8px 10px; background: #0f3460; border: 1px solid #1a4f90; border-radius: 6px; color: #eee; font-size: 14px; outline: none; }
+.btn { padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; }
+.btn-red { background: #e94560; color: #fff; }
+.btn-red:hover { background: #c73652; }
+.btn-green { background: #27ae60; color: #fff; }
+.btn-green:hover { background: #219a52; }
+.btn-row { display: flex; gap: 8px; margin-top: 8px; }
+#roomStatus { font-size: 12px; color: #888; margin-top: 8px; }
+#broadcastStatus { font-size: 12px; margin-top: 6px; }
+.live-badge { color: #e94560; font-weight: bold; }
+.offline-badge { color: #888; }
+.queue-list { flex: 1; overflow-y: auto; padding: 8px; }
+.qi { border-radius: 6px; background: #0f3460; margin-bottom: 6px; border: 1px solid transparent; display: flex; align-items: center; gap: 8px; padding: 8px 10px; transition: background .15s; }
+.qi:hover { background: #1a4a8a; }
+.qi.playing { border-color: #e94560; background: #1a1f50; }
+.qi.drag-over { border-color: #667eea; background: #1a2a6e; }
+.qi .drag-handle { cursor: grab; color: #444; font-size: 14px; flex-shrink: 0; padding: 2px 4px; user-select: none; }
+.qi .drag-handle:active { cursor: grabbing; }
+.qi .qt { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qi .qa { font-size: 11px; color: #aaa; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qi .qi-info { flex: 1; min-width: 0; }
+.qi-btn { border: none; border-radius: 4px; cursor: pointer; font-size: 11px; padding: 4px 8px; flex-shrink: 0; }
+.qi-play { background: #27ae60; color: #fff; }
+.qi-play:hover { background: #219a52; }
+.qi-del { background: transparent; color: #666; font-size: 14px; padding: 4px 6px; }
+.qi-del:hover { color: #e94560; background: rgba(233,69,96,.15); }
+.queue-header { display: flex; align-items: center; padding: 10px 16px 6px; }
+.queue-header h3 { font-size: 12px; color: #888; text-transform: uppercase; letter-spacing: 1px; flex: 1; }
+.queue-header .qi-clear { background: transparent; border: 1px solid #e94560; color: #e94560; border-radius: 4px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+.queue-header .qi-clear:hover { background: #e94560; color: #fff; }
+.right { display: flex; flex-direction: column; overflow-y: auto; }
+.now-playing { background: #16213e; padding: 16px 24px; border-bottom: 1px solid #0f3460; flex-shrink: 0; display: flex; align-items: center; gap: 16px; }
+#npCover { width: 72px; height: 72px; border-radius: 8px; object-fit: cover; flex-shrink: 0; display: none; box-shadow: 0 2px 12px rgba(0,0,0,.4); }
+#npCoverPlaceholder { width: 72px; height: 72px; border-radius: 8px; background: #0f3460; display: flex; align-items: center; justify-content: center; font-size: 28px; flex-shrink: 0; }
+.np-info { flex: 1; min-width: 0; }
+#npTitle { font-size: 18px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#npArtist { color: #aaa; font-size: 13px; margin-top: 4px; }
+#npGenre { color: #e94560; font-size: 11px; margin-top: 3px; text-transform: uppercase; letter-spacing: .5px; }
+.search-bar { padding: 16px; border-bottom: 1px solid #0f3460; background: #16213e; flex-shrink: 0; display: flex; gap: 8px; }
+.search-bar .inp { flex: 1; }
+#searchResults { flex: 1; overflow-y: auto; padding: 16px; }
+.ri { padding: 12px; border-radius: 6px; background: #16213e; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ri .rt { font-size: 14px; font-weight: 500; }
+.ri .ra { font-size: 12px; color: #aaa; margin-top: 2px; }
+.ri .btn { font-size: 12px; padding: 6px 12px; flex-shrink: 0; }
+.chat { height: 180px; border-top: 1px solid #0f3460; display: flex; flex-direction: column; flex-shrink: 0; }
+#chatMsgs { flex: 1; overflow-y: auto; padding: 10px; font-size: 13px; }
+.cm .cu { color: #e94560; font-weight: bold; }
+.chat-row { display: flex; border-top: 1px solid #0f3460; }
+.chat-row .inp { flex: 1; border-radius: 0; border: none; border-right: 1px solid #0f3460; }
+.chat-row button { padding: 8px 16px; background: #e94560; border: none; color: #fff; cursor: pointer; flex-shrink: 0; }
+</style>
+</head>
+<body>
+
+<div id="loginOverlay">
+  <div class="login-box">
+    <h2>Admin Panel</h2>
+    <input type="text" id="loginUser" placeholder="Username" value="testuser">
+    <input type="password" id="loginPass" placeholder="Password" value="password">
+    <button class="btn-login" onclick="doLogin()">Войти</button>
+    <div id="loginError"></div>
+  </div>
+</div>
+
+<header>
+  <h1>Omni Player — Admin</h1>
+  <span id="userInfo"></span>
+  <button id="logoutBtn" onclick="doLogout()" style="display:none">Выйти</button>
+</header>
+
+<main>
+  <div class="left">
+    <div class="sec">
+      <h3>Комната</h3>
+      <select id="roomSelect"><option value="">— выберите —</option></select>
+      <div class="btn-row">
+        <button class="btn btn-red" style="flex:1" onclick="doConnect()">Подключиться</button>
+        <button class="btn btn-green" style="flex:1" onclick="doCreateRoom()">+ Создать</button>
+      </div>
+      <div id="roomStatus">Не подключены</div>
+    </div>
+    <div class="sec">
+      <h3>Воспроизведение</h3>
+      <div id="broadcastStatus"><span class="offline-badge">&#9679; Стрим выключен</span></div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn btn-green" style="flex:1" onclick="doPlay()">&#9654; Play</button>
+        <button class="btn btn-red" style="flex:1" onclick="doPause()">&#9646;&#9646; Pause</button>
+      </div>
+    </div>
+    <div class="sec" style="border-bottom:none;padding-bottom:0">
+      <div class="btn-row" style="margin-top:4px">
+        <button class="btn btn-green" style="flex:1;font-size:12px;padding:6px" onclick="doSkipNext()">&#9654;&#9654; Следующий</button>
+      </div>
+    </div>
+    <div class="queue-header">
+      <h3>Очередь (<span id="queueCount">0</span>)</h3>
+      <button class="qi-clear" onclick="doClearQueue()">&#x1F5D1; Очистить</button>
+    </div>
+    <div class="queue-list" id="queueList">
+      <div style="text-align:center;color:#555;padding:20px;font-size:13px">Очередь пуста</div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="now-playing">
+      <img id="npCover" src="" alt="">
+      <div id="npCoverPlaceholder">🎵</div>
+      <div class="np-info">
+        <div id="npTitle">Ничего не играет</div>
+        <div id="npArtist">—</div>
+        <div id="npGenre"></div>
+      </div>
+    </div>
+    <div class="search-bar">
+      <input class="inp" type="text" id="searchQuery" placeholder="Поиск на SoundCloud..."
+             onkeydown="if(event.key==='Enter')doSearch()">
+      <button class="btn btn-red" onclick="doSearch()">Найти</button>
+    </div>
+    <div id="searchResults">
+      <div style="text-align:center;color:#555;padding:40px;font-size:13px">Введите запрос для поиска</div>
+    </div>
+    <div class="chat">
+      <div id="chatMsgs"></div>
+      <div class="chat-row">
+        <input class="inp" type="text" id="chatText" placeholder="Сообщение..."
+               onkeydown="if(event.key==='Enter')sendChat()">
+        <button onclick="sendChat()">&#8594;</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="/static/js/auth.js"></script>
+<script src="/static/js/room/equalizer.js"></script>
+<script>
+var _h = window.location.host;
+var _p = window.location.protocol;
+var API = _p + '//' + _h;
+var WS_BASE = (_p === 'https:' ? 'wss:' : 'ws:') + '//' + _h;
+var token = localStorage.getItem('token');
+var ws = null;
+var currentRoomId = null;
+var queue = [];
+var nowPlayingId = null;
+
+/* ── AUTH ── */
+function doLogin() {
+  var u = document.getElementById('loginUser').value;
+  var p = document.getElementById('loginPass').value;
+  var errEl = document.getElementById('loginError');
+  errEl.style.display = 'none';
+  AUTH.login(u, p, function(tok) {
+    token = tok;
+    AUTH.token = tok;
+    localStorage.setItem('token', tok);
+    onLoggedIn();
+  }, function(err) {
+    errEl.textContent = (err && err.message) ? err.message : 'Ошибка входа';
+    errEl.style.display = 'block';
+  });
+}
+function doLogout() { localStorage.removeItem('token'); location.reload(); }
+function onLoggedIn() {
+  document.getElementById('loginOverlay').style.display = 'none';
+  document.getElementById('logoutBtn').style.display = 'block';
+  AUTH.getCurrentUser(function(u) {
+    document.getElementById('userInfo').textContent = u.username;
+  }, function() {});
+  AUTH.getMyRooms(function(data) {
+    var rooms = data.rooms || data;
+    var sel = document.getElementById('roomSelect');
+    rooms.forEach(function(r) {
+      var o = document.createElement('option'); o.value = r.id; o.textContent = r.name; sel.appendChild(o);
+    });
+  }, function(err) { console.warn('getMyRooms error:', err); });
+}
+
+/* ── ROOM ── */
+function doCreateRoom() {
+  var name = prompt('Название:'); if (!name) return;
+  fetch(API + '/rooms/', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, description: '' })
+  }).then(function(r){return r.json();}).then(function(room) {
+    var sel = document.getElementById('roomSelect');
+    var o = document.createElement('option'); o.value = room.id; o.textContent = room.name; sel.appendChild(o); sel.value = room.id;
+  });
+}
+function doConnect() {
+  var roomId = parseInt(document.getElementById('roomSelect').value);
+  if (!roomId) { alert('Выберите комнату'); return; }
+  if (ws && ws.readyState === WebSocket.CONNECTING) {
+    ws.onclose = null;
+    ws.close();
+  } else if (ws) {
+    ws.close();
+  }
+  currentRoomId = roomId;
+  ws = new WebSocket(WS_BASE + '/ws/rooms/' + roomId + '?token=' + token);
+  ws.onopen = function() { document.getElementById('roomStatus').textContent = 'Подключены: комната ' + roomId; loadQueue(); };
+  ws.onmessage = function(e) {
+    var msg = JSON.parse(e.data);
+    if (msg.type === 'room_state') { handleRoomState(msg.data || msg); }
+    if (msg.type === 'chat') { appendChat(msg.user || '?', msg.content); }
+    if (msg.type === 'track_changed') {
+      if (msg.track) { setNowPlaying(msg.track); } else { clearNowPlaying(); }
+    }
+    if (msg.type === 'track_change') { loadQueue(); if (msg.data && msg.data.current_track) setNowPlaying(msg.data.current_track); }
+    if (msg.type === 'queue_updated') { loadQueue(); }
+    if (msg.type === 'thumbnail_updated' && msg.track_id && msg.thumbnail) {
+      if (msg.track_id === nowPlayingId) {
+        var cover = document.getElementById('npCover');
+        var placeholder = document.getElementById('npCoverPlaceholder');
+        cover.src = msg.thumbnail;
+        cover.style.display = 'block';
+        placeholder.style.display = 'none';
+      }
+      queue.forEach(function(t) { if (t.id === msg.track_id) t.thumbnail = msg.thumbnail; });
+      renderQueue();
+    }
+  };
+  ws.onclose = function() { document.getElementById('roomStatus').textContent = 'Отключены'; };
+}
+function handleRoomState(d) {
+  if (d.current_track) setNowPlaying(d.current_track);
+  updateBroadcastStatus(d.is_playing);
+}
+function setNowPlaying(t) {
+  document.getElementById('npTitle').textContent = t.title;
+  document.getElementById('npArtist').textContent = t.artist || '';
+  document.getElementById('npGenre').textContent = t.genre || '';
+  var cover = document.getElementById('npCover');
+  var placeholder = document.getElementById('npCoverPlaceholder');
+  if (t.thumbnail) {
+    cover.src = t.thumbnail;
+    cover.style.display = 'block';
+    placeholder.style.display = 'none';
+  } else {
+    cover.style.display = 'none';
+    placeholder.style.display = 'flex';
+  }
+  nowPlayingId = t.id;
+  renderQueue();
+}
+function clearNowPlaying() {
+  nowPlayingId = null;
+  document.getElementById('npTitle').textContent = 'Ничего не играет';
+  document.getElementById('npArtist').textContent = '—';
+  document.getElementById('npGenre').textContent = '';
+  document.getElementById('npCover').style.display = 'none';
+  document.getElementById('npCoverPlaceholder').style.display = 'flex';
+  updateBroadcastStatus(false);
+  renderQueue();
+}
+
+/* ── QUEUE ── */
+var _dragSrcId = null;
+function loadQueue() {
+  if (!currentRoomId) return;
+  fetch(API + '/stream/queue/' + currentRoomId, { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(function(r){return r.json();}).then(function(d){ queue = d.tracks || d || []; renderQueue(); }).catch(function(){});
+}
+function renderQueue() {
+  var el = document.getElementById('queueList');
+  var cnt = document.getElementById('queueCount');
+  if (cnt) cnt.textContent = queue.length;
+  if (!queue.length) { el.innerHTML = '<div style="text-align:center;color:#555;padding:20px;font-size:13px">Очередь пуста</div>'; return; }
+  el.innerHTML = queue.map(function(t) {
+    var thumb = t.thumbnail
+      ? '<img src="' + t.thumbnail + '" style="width:34px;height:34px;border-radius:4px;object-fit:cover;flex-shrink:0" onerror="this.parentNode.querySelector(\'.qi-ph\').style.display=\'flex\';this.style.display=\'none\'">'
+        + '<div class="qi-ph" style="display:none;width:34px;height:34px;border-radius:4px;background:#0f3460;align-items:center;justify-content:center;font-size:14px;flex-shrink:0">🎵</div>'
+      : '<div class="qi-ph" style="display:flex;width:34px;height:34px;border-radius:4px;background:#0f3460;align-items:center;justify-content:center;font-size:14px;flex-shrink:0">🎵</div>';
+    return '<div class="qi' + (t.id === nowPlayingId ? ' playing' : '') + '"'
+      + ' data-id="' + t.id + '"'
+      + ' draggable="true"'
+      + ' ondragstart="onDragStart(event,' + t.id + ')"'
+      + ' ondragover="onDragOver(event)"'
+      + ' ondragleave="onDragLeave(event)"'
+      + ' ondrop="onDrop(event,' + t.id + ')"'
+      + '>'
+      + '<span class="drag-handle" title="Перетащить">&#9776;</span>'
+      + thumb
+      + '<div class="qi-info"><div class="qt">' + t.title + '</div><div class="qa">' + (t.artist||'') + '</div></div>'
+      + '<button class="qi-btn qi-play" title="Играть" onclick="event.stopPropagation();selectTrack(' + t.id + ')">&#9654;</button>'
+      + '<button class="qi-btn qi-del" title="Удалить" onclick="event.stopPropagation();deleteTrack(' + t.id + ')">&#x2715;</button>'
+      + '</div>';
+  }).join('');
+}
+function selectTrack(id) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Подключитесь к комнате'); return; }
+  ws.send(JSON.stringify({ type: 'playback_control', action: 'play', track_id: id }));
+  nowPlayingId = id;
+  for (var i = 0; i < queue.length; i++) {
+    if (queue[i].id === id) { setNowPlaying(queue[i]); break; }
+  }
+  updateBroadcastStatus(true);
+}
+function deleteTrack(id) {
+  if (!currentRoomId) return;
+  fetch(API + '/rooms/' + currentRoomId + '/tracks/' + id, {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + token }
+  }).then(function() {
+    queue = queue.filter(function(t){ return t.id !== id; });
+    renderQueue();
+  }).catch(function(e){ console.error('Delete failed', e); });
+}
+function doClearQueue() {
+  if (!currentRoomId) { alert('Подключитесь к комнате'); return; }
+  if (!confirm('Удалить все треки из очереди?')) return;
+  fetch(API + '/rooms/' + currentRoomId + '/tracks', {
+    method: 'DELETE',
+    headers: { 'Authorization': 'Bearer ' + token }
+  }).then(function(r) { return r.json(); }).then(function() {
+    queue = [];
+    nowPlayingId = null;
+    renderQueue();
+    updateBroadcastStatus(false);
+    // Останавливаем стрим эквалайзера
+    if (typeof equalizer !== 'undefined' && equalizer && equalizer.pauseStream) {
+      equalizer.pauseStream();
+    }
+    document.getElementById('npTitle').textContent = 'Ничего не играет';
+    document.getElementById('npArtist').textContent = '—';
+    document.getElementById('npGenre').textContent = '';
+    document.getElementById('npCover').style.display = 'none';
+    document.getElementById('npCoverPlaceholder').style.display = 'flex';
+  }).catch(function(e){ console.error('Clear failed', e); });
+}
+function doSkipNext() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Подключитесь к комнате'); return; }
+  // Найти следующий трек после текущего
+  var curIdx = -1;
+  for (var i = 0; i < queue.length; i++) { if (queue[i].id === nowPlayingId) { curIdx = i; break; } }
+  var next = queue[curIdx + 1] || queue[0];
+  if (!next) { alert('Нет треков в очереди'); return; }
+  selectTrack(next.id);
+}
+/* ── DRAG & DROP ── */
+function onDragStart(e, id) {
+  _dragSrcId = id;
+  e.dataTransfer.effectAllowed = 'move';
+}
+function onDragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+function onDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+function onDrop(e, targetId) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  if (_dragSrcId === targetId) return;
+  var srcIdx = queue.findIndex(function(t){ return t.id === _dragSrcId; });
+  var dstIdx = queue.findIndex(function(t){ return t.id === targetId; });
+  if (srcIdx < 0 || dstIdx < 0) return;
+  var moved = queue.splice(srcIdx, 1)[0];
+  queue.splice(dstIdx, 0, moved);
+  renderQueue();
+  // Сохраняем порядок на сервере
+  fetch(API + '/rooms/' + currentRoomId + '/tracks/reorder', {
+    method: 'PUT',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ order: queue.map(function(t){ return t.id; }) })
+  }).catch(function(e){ console.error('Reorder failed', e); });
+}
+
+/* ── PLAYBACK ── */
+function doPlay() {
+  if (!currentRoomId) { alert('Подключитесь к комнате'); return; }
+  if (!nowPlayingId && queue.length) { selectTrack(queue[0].id); return; }
+  if (!nowPlayingId) { alert('Добавьте треки в очередь'); return; }
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'playback_control', action: 'play', track_id: nowPlayingId }));
+  updateBroadcastStatus(true);
+}
+function doPause() {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'playback_control', action: 'pause' }));
+  updateBroadcastStatus(false);
+}
+function updateBroadcastStatus(live) {
+  document.getElementById('broadcastStatus').innerHTML = live
+    ? '<span class="live-badge">&#9679; В эфире</span>'
+    : '<span class="offline-badge">&#9679; Стрим выключен</span>';
+}
+
+/* ── SEARCH ── */
+function doSearch() {
+  var q = document.getElementById('searchQuery').value.trim(); if (!q) return;
+  var res = document.getElementById('searchResults');
+  res.innerHTML = '<div style="text-align:center;padding:20px">Поиск...</div>';
+  fetch(API + '/stream/search/soundcloud?query=' + encodeURIComponent(q) + '&limit=20', { headers: { 'Authorization': 'Bearer ' + token } })
+    .then(function(r){return r.json();}).then(function(d) {
+      var tracks = d.tracks || [];
+      if (!tracks.length) { res.innerHTML = '<div style="text-align:center;color:#555;padding:20px">Ничего не найдено</div>'; return; }
+      var html = '';
+      tracks.forEach(function(t, i) {
+        var dur = t.duration || 0;
+        var ts = Math.floor(dur/60) + ':' + String(Math.floor(dur%60)).padStart(2,'0');
+        var thumb = t.thumbnail ? '<img src="' + t.thumbnail + '" style="width:44px;height:44px;border-radius:6px;object-fit:cover;flex-shrink:0" onerror="this.style.display=\'none\'">' : '<div style="width:44px;height:44px;border-radius:6px;background:#0f3460;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0">🎵</div>';
+        html += '<div class="ri" style="display:flex;align-items:center;gap:10px">'
+              + thumb
+              + '<div style="flex:1;min-width:0"><div class="rt">' + t.title + '</div><div class="ra">' + (t.artist||'') + ' &middot; ' + ts + '</div></div>'
+              + '<button class="btn btn-green" onclick="addByIdx(' + i + ')">+ В очередь</button>'
+              + '</div>';
+      });
+      res.innerHTML = html;
+      window._searchTracks = tracks;
+    }).catch(function(e) { res.innerHTML = '<div style="color:#e94560;padding:20px">Ошибка: ' + e.message + '</div>'; });
+}
+function addByIdx(i) {
+  if (!window._searchTracks) return;
+  addToQueue(window._searchTracks[i]);
+}
+function addToQueue(track) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Подключитесь к комнате'); return; }
+  // Передаём source_track_id как постоянный URL страницы трека (для повторного получения стрим-URL)
+  var trackToSend = Object.assign({}, track, {
+    source_track_id: track.track_page_url || track.source_track_id || String(track.id || '')
+  });
+  ws.send(JSON.stringify({ type: 'track_change', track: trackToSend }));
+  setTimeout(loadQueue, 700);
+}
+
+/* ── CHAT ── */
+function sendChat() {
+  var inp = document.getElementById('chatText');
+  var t = inp.value.trim(); if (!t || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'chat', content: t }));
+  inp.value = '';
+}
+function appendChat(user, content) {
+  var el = document.getElementById('chatMsgs');
+  el.innerHTML += '<div class="cm"><span class="cu">' + user + ':</span> ' + content + '</div>';
+  el.scrollTop = el.scrollHeight;
+}
+
+/* ── INIT ── */
+if (token) {
+  AUTH.token = token;
+  AUTH.getCurrentUser(function(u) {
+    document.getElementById('userInfo').textContent = u.username;
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('logoutBtn').style.display = 'block';
+    AUTH.getMyRooms(function(data) {
+      var rooms = data.rooms || data;
+      var sel = document.getElementById('roomSelect');
+      rooms.forEach(function(r) {
+        var o = document.createElement('option'); o.value = r.id; o.textContent = r.name; sel.appendChild(o);
+      });
+    }, function() {});
+  }, function() {
+    localStorage.removeItem('token');
+    token = null;
+    AUTH.token = null;
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+/* equalizer.css — дополнительные стили для панели эквалайзера */
+
+#eqPanel {
+  min-width: 380px;
+  max-width: 520px;
+}
+
+/* Вертикальные ползунки в Firefox */
+input[type=range][orient="vertical"] {
+  writing-mode: vertical-lr;
+  direction: rtl;
+}
+
+/* Webkit вертикальный slider */
+input[type=range].eq-slider {
+  -webkit-appearance: slider-vertical;
+  width: 24px;
+  height: 90px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+input[type=range].eq-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(108,99,255,0.25);
+}
+input[type=range].eq-slider::-webkit-slider-runnable-track {
+  width: 4px;
+  background: var(--progress-track);
+  border-radius: 99px;
+}
