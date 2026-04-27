@@ -2,12 +2,13 @@
 Stream routing - handle audio streaming endpoints
 """
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.database.session import get_db
 from app.database.models import Room, Track, RoomTrack
+from pathlib import Path
 
 router = APIRouter(prefix="/stream", tags=["stream"])
-
 
 @router.get("/room/{room_id}/status")
 async def get_stream_status(room_id: int, db: Session = Depends(get_db)):
@@ -38,7 +39,6 @@ async def get_stream_status(room_id: int, db: Session = Depends(get_db)):
         response["listeners"] = len(bc.listeners)
     
     return response
-
 
 @router.get("/room/{room_id}/stream")
 async def get_room_stream(room_id: int, db: Session = Depends(get_db)):
@@ -119,6 +119,79 @@ async def get_room_stream(room_id: int, db: Session = Depends(get_db)):
         }
     )
 
+@router.get("/room/{room_id}/hls/playlist.m3u8")
+async def get_hls_playlist(room_id: int, db: Session = Depends(get_db)):
+    """
+    Get HLS playlist for room.
+    Returns .m3u8 playlist file for HLS streaming.
+    """
+    from app.room.hls import hls_manager
+    
+    print(f"📺 [HLS] Room {room_id}: Playlist request")
+    
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    # Check if HLS transcoding is running
+    if not hls_manager.is_transcoding(room_id):
+        print(f"⚠️ [HLS] Room {room_id}: HLS not started")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="HLS transcoding not started"
+        )
+    
+    playlist_path = hls_manager.get_playlist_path(room_id)
+    if not playlist_path or not Path(playlist_path).exists():
+        print(f"❌ [HLS] Room {room_id}: Playlist not found")
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    
+    print(f"✅ [HLS] Room {room_id}: Serving playlist")
+    return FileResponse(
+        playlist_path,
+        media_type="application/vnd.apple.mpegurl",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+    )
+
+@router.get("/room/{room_id}/hls/{segment_name}")
+async def get_hls_segment(room_id: int, segment_name: str, db: Session = Depends(get_db)):
+    """
+    Get HLS segment file.
+    Returns .ts segment file for HLS streaming.
+    """
+    from app.room.hls import hls_manager
+    
+    # Validate segment name (security)
+    if not segment_name.endswith('.ts') or '/' in segment_name or '\\' in segment_name:
+        raise HTTPException(status_code=400, detail="Invalid segment name")
+    
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    
+    # Get transcoder
+    transcoder = hls_manager.transcoders.get(room_id)
+    if not transcoder or not transcoder.output_dir:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="HLS transcoding not available"
+        )
+    
+    segment_path = transcoder.output_dir / segment_name
+    if not segment_path.exists():
+        raise HTTPException(status_code=404, detail="Segment not found")
+    
+    return FileResponse(
+        str(segment_path),
+        media_type="video/mp2t",
+        headers={
+            "Cache-Control": "public, max-age=31536000",  # Сегменты можно кэшировать
+        }
+    )
 
 @router.get("/queue/{room_id}")
 async def get_room_queue(room_id: int, db: Session = Depends(get_db)):

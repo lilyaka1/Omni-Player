@@ -141,7 +141,7 @@ class RoomManager:
                 await self._broadcast_thumbnail(result["room_id"], track_id, result["thumb"])
 
             import time
-            self._url_fresh_until[track_id] = time.monotonic() + 3600 * 4  # 4 часа
+            self._url_fresh_until[track_id] = time.monotonic() + 3600 * 6  # 6 часов (увеличено для лучшего кэширования)
 
         except Exception as e:
             elapsed = (_t.perf_counter() - _pf_t0) * 1000
@@ -201,7 +201,7 @@ class RoomManager:
                         db.close()
 
                 await asyncio.to_thread(_save)
-                self._url_fresh_until[track_id] = _t.monotonic() + 3600 * 4  # 4 часа
+                self._url_fresh_until[track_id] = _t.monotonic() + 3600 * 6  # 6 часов (увеличено для лучшего кэширования)
                 print(f"✅ [url_refresh] track {track_id} refreshed")
 
             except Exception as e:
@@ -431,7 +431,7 @@ class RoomManager:
                 print(f"⏱  [room] +{elapsed:.0f}ms starting ffmpeg...")
                 
                 # Запускаем prefetch следующего трека в фоне (чтобы не было задержки)
-                asyncio.create_task(self._prefetch_next_track(room_id, db_session_factory, soundcloud_client))
+                asyncio.create_task(self._aggressive_prefetch(room_id, track_id, db_session_factory, soundcloud_client))
                 
                 result = await stream_ffmpeg(bc, stream_url)
 
@@ -514,3 +514,96 @@ class RoomManager:
             print(f"⚠️ thumbnail broadcast failed: {e}")
 
 room_manager = RoomManager()
+
+    async def _aggressive_prefetch(self, room_id: int, current_track_id: int, db_session_factory, soundcloud_client):
+        """
+        Агрессивный prefetch: загружаем следующие 2-3 трека заранее.
+        Вызывается когда начинается воспроизведение текущего трека.
+        """
+        try:
+            from app.database.models import RoomTrack
+            
+            def _get_next_tracks():
+                db = db_session_factory()
+                try:
+                    current = db.query(RoomTrack).filter(RoomTrack.id == current_track_id).first()
+                    if not current:
+                        return []
+                    
+                    # Получаем следующие 3 трека
+                    if current.order is not None:
+                        next_tracks = (
+                            db.query(RoomTrack)
+                            .filter(
+                                RoomTrack.room_id == room_id,
+                                RoomTrack.order > current.order
+                            )
+                            .order_by(RoomTrack.order)
+                            .limit(3)
+                            .all()
+                        )
+                    else:
+                        next_tracks = (
+                            db.query(RoomTrack)
+                            .filter(
+                                RoomTrack.room_id == room_id,
+                                RoomTrack.id > current_track_id
+                            )
+                            .order_by(RoomTrack.id)
+                            .limit(3)
+                            .all()
+                        )
+                    
+                    return [
+                        {
+                            "id": t.id,
+                            "source_track_id": t.source_track_id,
+                            "title": t.title,
+                            "stream_url": t.stream_url
+                        }
+                        for t in next_tracks
+                        if t.source_track_id
+                    ]
+                finally:
+                    db.close()
+            
+            # Ждём 3 секунды после старта текущего трека
+            await asyncio.sleep(3)
+            
+            next_tracks = await asyncio.to_thread(_get_next_tracks)
+            if not next_tracks:
+                print(f"⚡ [aggressive_prefetch] No tracks to prefetch for room {room_id}")
+                return
+            
+            print(f"🚀 [aggressive_prefetch] Starting prefetch of {len(next_tracks)} tracks for room {room_id}")
+            
+            # Запускаем prefetch параллельно для всех треков
+            tasks = []
+            for track in next_tracks:
+                # Пропускаем если URL уже есть и свежий
+                if track["stream_url"] and not self._is_url_expired(track["stream_url"]):
+                    fresh_until = self._url_fresh_until.get(track["id"], 0)
+                    if _t.monotonic() < fresh_until:
+                        print(f"⏩ [aggressive_prefetch] Track {track['id']} already fresh, skipping")
+                        continue
+                
+                # Добавляем задержку между запросами чтобы не ддосить SoundCloud
+                await asyncio.sleep(0.5)
+                
+                task = asyncio.create_task(
+                    self.prefetch_track_url(
+                        track["id"],
+                        track["source_track_id"],
+                        db_session_factory,
+                        soundcloud_client
+                    )
+                )
+                tasks.append(task)
+            
+            # Ждём завершения всех prefetch задач
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                print(f"✅ [aggressive_prefetch] Completed prefetch of {len(tasks)} tracks for room {room_id}")
+            
+        except Exception as e:
+            print(f"⚠️ [aggressive_prefetch] Error: {e}")
