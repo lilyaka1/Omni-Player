@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 
 from app.database.session import engine
 from app.database.models import Base
-from app.core.config import get_settings
+from app.core.config import settings
 
 # Домены
 from app.domains.auth.router import router as auth_router
@@ -14,17 +14,15 @@ from app.domains.rooms.router import router as rooms_router
 from app.domains.tracks.router import router as tracks_router
 
 # Admin
-from app.admin.routes import router as admin_router
+# from app.admin.routes import router as admin_router
 
 # WebSocket
-from app.websocket.router import router as websocket_router
+# from app.websocket.router import router as websocket_router
 
 # Player
-from app.player.routes import router as player_router
+# from app.player.routes import router as player_router
 
 import os
-
-settings = get_settings()
 
 
 @asynccontextmanager
@@ -87,9 +85,9 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(rooms_router)
 app.include_router(tracks_router)
-app.include_router(admin_router)
-app.include_router(websocket_router)
-app.include_router(player_router)
+# app.include_router(admin_router)
+# app.include_router(websocket_router)
+# app.include_router(player_router)
 
 # Статика
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

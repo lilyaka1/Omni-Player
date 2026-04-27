@@ -11,6 +11,7 @@ from app.websocket.handlers import (
     handle_track_change,
     handle_playback_control,
 )
+from app.voice_inserts.ws_handlers import handle_insert_message
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
@@ -42,6 +43,8 @@ async def websocket_endpoint(
                 await handle_track_change(websocket, room_id, user, data)
             elif msg_type == "playback_control":
                 await handle_playback_control(room_id, data)
+            elif isinstance(msg_type, str) and msg_type.startswith("insert_"):
+                await handle_insert_message(websocket, room_id, user.id, user_role, data)
 
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)

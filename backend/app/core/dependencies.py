@@ -1,73 +1,72 @@
-"""
-Общие FastAPI-зависимости для всего приложения.
-Импортируй get_current_user / get_admin_user вместо того,
-чтобы дублировать их в каждом роутере.
-"""
-from fastapi import Depends, Header, HTTPException, status
+from typing import Generator, Optional
+from fastapi import Depends, HTTPException, status, WebSocket
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
+from app.database.session import SessionLocal
+from app.room.manager import RoomManager
+from app.database.models import User
+from jose import jwt
 
-from app.database.session import get_db
-from app.database.models import User, RoleEnum
-from app.domains.auth.service import decode_token
+security = HTTPBearer(auto_error=False)
 
+def get_db() -> Generator[Session, None, None]:
+    """Dependency that provides a database session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-async def get_current_user(
-    authorization: str = Header(None),
-    db: Session = Depends(get_db),
-) -> User:
-    """Возвращает текущего пользователя по JWT-токену из заголовка Authorization."""
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """Get current user from JWT token."""
+    if credentials is None:
+        return None
+    
+    token = credentials.credentials
+    try:
+        from app.core.config import settings
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
         )
-    token = authorization.split(" ")[-1]
-    email = decode_token(token)
-    if not email:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token",
-        )
-    user = db.query(User).filter(User.email == email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-    if user.is_blocked:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is blocked",
-        )
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+    except jwt.PyJWTError:
+        return None
+    
+    user = db.query(User).filter(User.id == user_id).first()
     return user
 
+def get_room_manager() -> RoomManager:
+    """Dependency that provides the room manager singleton."""
+    return RoomManager()
 
-async def get_current_user_optional(
-    authorization: str = Header(None),
-    db: Session = Depends(get_db),
-) -> User | None:
-    """Возвращает пользователя, но не валит запрос если токен отсутствует или просрочен."""
-    if not authorization:
+async def get_current_user_ws(
+    websocket: WebSocket,
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """Get current user from WebSocket connection."""
+    token = websocket.query_params.get("token")
+    if not token:
         return None
-    token = authorization.split(" ")[-1]
-    email = decode_token(token)
-    if not email:
-        return None
-    user = db.query(User).filter(User.email == email).first()
-    if not user or user.is_blocked:
-        return None
-    return user
-
-
-async def get_admin_user(
-    authorization: str = Header(None),
-    db: Session = Depends(get_db),
-) -> User:
-    """Возвращает пользователя, проверяя наличие роли ADMIN."""
-    user = await get_current_user(authorization=authorization, db=db)
-    if user.role != RoleEnum.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
+    
+    try:
+        from app.core.config import settings
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM]
         )
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            return None
+    except jwt.PyJWTError:
+        return None
+    
+    user = db.query(User).filter(User.id == user_id).first()
     return user

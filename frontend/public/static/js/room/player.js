@@ -513,6 +513,13 @@ const PlayerModule = (function () {
           : (Array.isArray(GLOBAL.queue) ? (GLOBAL.queue.find(t => t.id === selectedId) || GLOBAL.queue[0]) : null);
 
         if (candidateTrack && audio && typeof StreamModule !== 'undefined') {
+        // КРИТИЧНО: Принудительно очищаем src и буфер для переподключения к live-стриму
+        if (audio) {
+          audio.pause();
+          audio.src = '';
+          audio.load();
+          console.log('[togglePlay] Cleared audio buffer for reconnection');
+        }
           StreamModule.assignAudio(audio, candidateTrack, true);
         }
         if (typeof roomTrace === 'function') {

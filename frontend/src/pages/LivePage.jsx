@@ -31,6 +31,17 @@ export default function LivePage() {
   const dragSourceIdRef = useRef(null);
 
   useEffect(() => {
+    // Всегда загружаем комнаты (не требуют авторизации)
+    fetch('/rooms/')
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json();
+        const allRooms = data.rooms || data;
+        setRooms(Array.isArray(allRooms) ? allRooms : []);
+      })
+      .catch(() => {});
+
+    // Если есть токен - загружаем юзера
     if (!token) return;
 
     fetch('/auth/me', { headers: { Authorization: `Bearer ${token}` } })
@@ -42,15 +53,6 @@ export default function LivePage() {
         }
         const user = await res.json();
         setCurrentUser(user);
-      })
-      .catch(() => {});
-
-    fetch('/rooms/')
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json();
-        const allRooms = data.rooms || data;
-        setRooms(Array.isArray(allRooms) ? allRooms : []);
       })
       .catch(() => {});
   }, [token]);

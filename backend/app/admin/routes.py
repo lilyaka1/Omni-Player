@@ -1,11 +1,24 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
 from typing import List
-from app.database.session import get_db
-from app.database.models import User, Room, RoleEnum
+from app.core.dependencies import get_db, get_current_user
+from app.database.models import User, Room, UserRole
 from app.domains.rooms.schemas import RoomResponse
-from app.core.dependencies import get_admin_user
 from pydantic import BaseModel
+
+def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    """Verify that the current user is an admin."""
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required"
+        )
+    return current_user
 
 class UserAdminResponse(BaseModel):
     id: int

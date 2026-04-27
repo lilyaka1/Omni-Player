@@ -27,6 +27,12 @@ select, .inp { width: 100%; padding: 8px 10px; background: #0f3460; border: 1px 
 .btn-green { background: #27ae60; color: #fff; }
 .btn-green:hover { background: #219a52; }
 .btn-row { display: flex; gap: 8px; margin-top: 8px; }
+#voiceText { min-height: 72px; resize: vertical; margin-top: 8px; }
+.chk-row { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #bbb; }
+.voice-list { margin-top: 10px; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.vi { background: #0f3460; border: 1px solid #1a4f90; border-radius: 6px; padding: 8px; }
+.vi-t { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vi-s { font-size: 11px; color: #9cb3d4; margin-top: 4px; }
 #roomStatus { font-size: 12px; color: #888; margin-top: 8px; }
 #broadcastStatus { font-size: 12px; margin-top: 6px; }
 .live-badge { color: #e94560; font-weight: bold; }
@@ -115,6 +121,22 @@ select, .inp { width: 100%; padding: 8px 10px; background: #0f3460; border: 1px 
         <button class="btn btn-green" style="flex:1;font-size:12px;padding:6px" onclick="doSkipNext()">&#9654;&#9654; Следующий</button>
       </div>
     </div>
+    <div class="sec">
+      <h3>AI Voice Inserts</h3>
+      <label class="chk-row">
+        <input type="checkbox" id="voiceEnabled" checked>
+        Включить голосовые вставки
+      </label>
+      <textarea id="voiceText" class="inp" placeholder="Текст анонса/подводки..."></textarea>
+      <div class="btn-row">
+        <button class="btn btn-green" style="flex:1" onclick="doInsertCreate()">Озвучить</button>
+        <button class="btn" style="flex:1;background:#2d7dd2;color:#fff" onclick="doInsertCheck()">Проверка</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-red" style="flex:1" onclick="doInsertClear()">Очистить вставки</button>
+      </div>
+      <div id="voiceList" class="voice-list"></div>
+    </div>
     <div class="queue-header">
       <h3>Очередь (<span id="queueCount">0</span>)</h3>
       <button class="qi-clear" onclick="doClearQueue()">&#x1F5D1; Очистить</button>
@@ -165,6 +187,29 @@ var ws = null;
 var currentRoomId = null;
 var queue = [];
 var nowPlayingId = null;
+var voiceInserts = [];
+var _trackMetaDelayMs = 4000;
+var _delayedTrackTimer = null;
+var _delayedTrackSeq = 0;
+
+function cancelDelayedTrackApply() {
+  _delayedTrackSeq += 1;
+  if (_delayedTrackTimer) {
+    clearTimeout(_delayedTrackTimer);
+    _delayedTrackTimer = null;
+  }
+}
+
+function delayedSetNowPlaying(track) {
+  if (!track) return;
+  cancelDelayedTrackApply();
+  var seq = _delayedTrackSeq;
+  _delayedTrackTimer = setTimeout(function() {
+    if (seq !== _delayedTrackSeq) return;
+    _delayedTrackTimer = null;
+    setNowPlaying(track);
+  }, _trackMetaDelayMs);
+}
 
 /* ── AUTH ── */
 function doLogin() {
@@ -221,16 +266,32 @@ function doConnect() {
   }
   currentRoomId = roomId;
   ws = new WebSocket(WS_BASE + '/ws/rooms/' + roomId + '?token=' + token);
-  ws.onopen = function() { document.getElementById('roomStatus').textContent = 'Подключены: комната ' + roomId; loadQueue(); };
+  ws.onopen = function() {
+    document.getElementById('roomStatus').textContent = 'Подключены: комната ' + roomId;
+    loadQueue();
+    ws.send(JSON.stringify({ type: 'insert_list' }));
+  };
   ws.onmessage = function(e) {
     var msg = JSON.parse(e.data);
-    if (msg.type === 'room_state') { handleRoomState(msg.data || msg); }
+    if (msg.type === 'room_state') { cancelDelayedTrackApply(); handleRoomState(msg.data || msg); }
     if (msg.type === 'chat') { appendChat(msg.user || '?', msg.content); }
     if (msg.type === 'track_changed') {
-      if (msg.track) { setNowPlaying(msg.track); } else { clearNowPlaying(); }
+      if (msg.track) { delayedSetNowPlaying(msg.track); } else { clearNowPlaying(); }
     }
-    if (msg.type === 'track_change') { loadQueue(); if (msg.data && msg.data.current_track) setNowPlaying(msg.data.current_track); }
+    if (msg.type === 'track_change') {
+      cancelDelayedTrackApply();
+      loadQueue();
+      if (msg.data && msg.data.current_track) setNowPlaying(msg.data.current_track);
+    }
     if (msg.type === 'queue_updated') { loadQueue(); }
+    if (msg.type === 'insert_created' && msg.insert) { upsertInsert(msg.insert); }
+    if (msg.type === 'insert_ready' && msg.insert) { upsertInsert(msg.insert); }
+    if (msg.type === 'insert_failed') { markInsertStatus(msg.insert_id, 'failed', msg.error || 'failed'); }
+    if (msg.type === 'insert_timeout' && msg.insert) { markInsertStatus(msg.insert.id, 'timeout', 'timeout'); }
+    if (msg.type === 'insert_cancelled') { removeInsert(msg.insert_id); }
+    if (msg.type === 'insert_list' && Array.isArray(msg.inserts)) { voiceInserts = msg.inserts; renderVoiceInserts(); }
+    if (msg.type === 'insert_cleared') { voiceInserts = []; renderVoiceInserts(); }
+    if (msg.type === 'insert_clear_done') { voiceInserts = []; renderVoiceInserts(); }
     if (msg.type === 'thumbnail_updated' && msg.track_id && msg.thumbnail) {
       if (msg.track_id === nowPlayingId) {
         var cover = document.getElementById('npCover');
@@ -248,6 +309,65 @@ function doConnect() {
 function handleRoomState(d) {
   if (d.current_track) setNowPlaying(d.current_track);
   updateBroadcastStatus(d.is_playing);
+}
+
+function renderVoiceInserts() {
+  var el = document.getElementById('voiceList');
+  if (!el) return;
+  if (!voiceInserts.length) {
+    el.innerHTML = '<div style="color:#666;font-size:12px">Нет активных вставок</div>';
+    return;
+  }
+  el.innerHTML = voiceInserts.map(function(v) {
+    return '<div class="vi">'
+      + '<div class="vi-t">' + (v.text || '') + '</div>'
+      + '<div class="vi-s">' + (v.status || 'pending') + '</div>'
+      + '</div>';
+  }).join('');
+}
+
+function upsertInsert(insert) {
+  var idx = voiceInserts.findIndex(function(v){ return String(v.id) === String(insert.id); });
+  if (idx >= 0) voiceInserts[idx] = Object.assign({}, voiceInserts[idx], insert);
+  else voiceInserts.unshift(insert);
+  renderVoiceInserts();
+}
+
+function markInsertStatus(insertId, status, error) {
+  var idx = voiceInserts.findIndex(function(v){ return String(v.id) === String(insertId); });
+  if (idx >= 0) {
+    voiceInserts[idx].status = status;
+    if (error) voiceInserts[idx].error = error;
+  }
+  renderVoiceInserts();
+}
+
+function removeInsert(insertId) {
+  voiceInserts = voiceInserts.filter(function(v){ return String(v.id) !== String(insertId); });
+  renderVoiceInserts();
+}
+
+function doInsertCreate() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Подключитесь к комнате'); return; }
+  var enabled = document.getElementById('voiceEnabled').checked;
+  if (!enabled) { alert('Вставки отключены чекбоксом'); return; }
+  var text = document.getElementById('voiceText').value.trim();
+  if (!text) { alert('Введите текст для озвучки'); return; }
+  ws.send(JSON.stringify({ type: 'insert_create', text: text }));
+}
+
+function doInsertCheck() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Подключитесь к комнате'); return; }
+  var enabled = document.getElementById('voiceEnabled').checked;
+  if (!enabled) { alert('Вставки отключены чекбоксом'); return; }
+  var text = 'Тест TTS, время ' + new Date().toLocaleTimeString('ru-RU');
+  ws.send(JSON.stringify({ type: 'insert_create', text: text }));
+}
+
+function doInsertClear() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { alert('Подключитесь к комнате'); return; }
+  if (!confirm('Очистить все активные голосовые вставки?')) return;
+  ws.send(JSON.stringify({ type: 'insert_clear' }));
 }
 function setNowPlaying(t) {
   document.getElementById('npTitle').textContent = t.title;

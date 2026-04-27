@@ -39,6 +39,13 @@ class RoomManager:
             print(f"📻 Room {room_id} broadcast already running")
             return
 
+        # Прогреваем TTS-кэш стандартных фраз при запуске комнаты.
+        try:
+            from app.voice_inserts.queue import prewarm_room
+            asyncio.create_task(prewarm_room(room_id))
+        except Exception as e:
+            print(f"⚠️ Room {room_id}: voice prewarm not started: {e}")
+
         bc.running = True
         bc.task = asyncio.create_task(
             self._broadcast_loop(bc, room_id, db_session_factory, soundcloud_client)
@@ -315,6 +322,29 @@ class RoomManager:
             finally:
                 db.close()
 
+        def _count_remaining_tracks(current_track_id: int) -> int:
+            """Сколько треков осталось до конца очереди от текущего (включая текущий)."""
+            db = db_session_factory()
+            try:
+                current = db.query(RoomTrack).filter(RoomTrack.id == current_track_id).first()
+                if not current:
+                    return 0
+
+                if current.order is not None:
+                    return (
+                        db.query(RoomTrack)
+                        .filter(RoomTrack.room_id == room_id, RoomTrack.order >= current.order)
+                        .count()
+                    )
+
+                return (
+                    db.query(RoomTrack)
+                    .filter(RoomTrack.room_id == room_id, RoomTrack.id >= current_track_id)
+                    .count()
+                )
+            finally:
+                db.close()
+
         # ────────────────────────────────────────────────────────────────────────
 
         print(f"🔄 Room {room_id}: broadcast loop started")
@@ -340,6 +370,15 @@ class RoomManager:
                 bc.current_track_id = track_id
                 bc.current_track_title = f"{state['artist']} - {state['title']}"
                 bc.skip_event.clear()
+
+                # Если в очереди осталось <=5 треков, догреваем TTS-кэш заранее.
+                try:
+                    remaining = await asyncio.to_thread(_count_remaining_tracks, track_id)
+                    if remaining <= 5:
+                        from app.voice_inserts.queue import on_queue_change
+                        asyncio.create_task(on_queue_change(room_id, remaining))
+                except Exception as e:
+                    print(f"⚠️ [voice] queue warmup check failed room {room_id}: {e}")
 
                 _loop_t0 = _t.perf_counter()
                 print(f"\n⏱  [room] room {room_id}: START '{bc.current_track_title}'")

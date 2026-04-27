@@ -1,250 +1,143 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Enum, Float, Table, UniqueConstraint
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
-from datetime import datetime
+from sqlalchemy import (
+    Column, Integer, String, Float, Boolean, DateTime, ForeignKey, Text,
+    Table, LargeBinary, Enum as SAEnum
+)
+from sqlalchemy.orm import relationship, declarative_base
+from sqlalchemy.sql import func
 import enum
+from datetime import datetime
 
 Base = declarative_base()
 
-class RoleEnum(str, enum.Enum):
-    USER = "user"
+class UserRole(str, enum.Enum):
     ADMIN = "admin"
+    USER = "user"
+    DJ = "dj"
 
-class RoomRoleEnum(str, enum.Enum):
-    ADMIN = "admin"  # Может управлять комнатой, банить юзеров
-    USER = "user"  # Просто слушает
+class RoomType(str, enum.Enum):
+    PUBLIC = "public"
+    PRIVATE = "private"
 
-class SourceEnum(str, enum.Enum):
-    SOUNDCLOUD = "soundcloud"
-    YOUTUBE = "youtube"
-    SPOTIFY = "spotify"
-    LOCAL = "local"
-
-# Association table for many-to-many relationship with roles
-user_room_association = Table(
-    'user_room',
-    Base.metadata,
-    Column('user_id', Integer, ForeignKey('user.id')),
-    Column('room_id', Integer, ForeignKey('room.id')),
-    Column('role', Enum(RoomRoleEnum), default=RoomRoleEnum.USER),
-    Column('is_banned', Boolean, default=False),
-    Column('joined_at', DateTime, default=datetime.utcnow)
-)
+class TrackStatus(str, enum.Enum):
+    QUEUED = "queued"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    FINISHED = "finished"
+    SKIPPED = "skipped"
+    ERROR = "error"
 
 class User(Base):
-    __tablename__ = "user"
+    __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
-    username = Column(String, unique=True, index=True)
-    password_hash = Column(String)
-    role = Column(Enum(RoleEnum), default=RoleEnum.USER)
-    is_blocked = Column(Boolean, default=False)
-    can_create_rooms = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    username = Column(String(50), unique=True, index=True, nullable=False)
+    email = Column(String(100), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    display_name = Column(String(100))
+    avatar_url = Column(String(500))
+    role = Column(SAEnum(UserRole), default=UserRole.USER)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relations
-    rooms = relationship("Room", back_populates="creator")
-    messages = relationship("Message", back_populates="user")
-    tracks_added = relationship("RoomTrack", back_populates="added_by", foreign_keys="RoomTrack.added_by_id")
-    joined_rooms = relationship(
-        "Room",
-        secondary=user_room_association,
-        back_populates="users"
-    )
+    # Relationships
+    rooms = relationship("Room", back_populates="owner")
+    playlists = relationship("Playlist", back_populates="user")
+    voice_inserts = relationship("VoiceInsert", back_populates="user")
 
 class Room(Base):
-    __tablename__ = "room"
+    __tablename__ = "rooms"
     
     id = Column(Integer, primary_key=True, index=True)
-    creator_id = Column(Integer, ForeignKey('user.id'))
-    name = Column(String, index=True)
-    description = Column(String)
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    room_type = Column(SAEnum(RoomType), default=RoomType.PUBLIC)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_active = Column(Boolean, default=True)
+    max_users = Column(Integer, default=50)
+    current_users = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Continuous playback tracking (room broadcast mode)
-    now_playing_track_id = Column(Integer, ForeignKey('room_track.id', ondelete='SET NULL'), nullable=True)
-    playback_started_at = Column(DateTime, nullable=True)  # When current track started
-    is_playing = Column(Boolean, default=False)  # Server-side playback state
-    queue_mode = Column(String, default='loop')  # 'loop' or 'once'
-    
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relations
-    creator = relationship("User", back_populates="rooms")
-    tracks = relationship("RoomTrack", back_populates="room", foreign_keys="RoomTrack.room_id", cascade="all, delete-orphan")
-    now_playing = relationship("RoomTrack", foreign_keys="Room.now_playing_track_id", uselist=False)
-    messages = relationship("Message", back_populates="room", cascade="all, delete-orphan")
-    users = relationship(
-        "User",
-        secondary=user_room_association,
-        back_populates="joined_rooms"
-    )
-
-class RoomTrack(Base):
-    __tablename__ = "room_track"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(Integer, ForeignKey('room.id'))
-    source = Column(Enum(SourceEnum), default=SourceEnum.LOCAL)
-    source_track_id = Column(String)
-    title = Column(String)
-    artist = Column(String)
-    duration = Column(Float)
-    stream_url = Column(String)
-    thumbnail = Column(String, nullable=True)
-    genre = Column(String, nullable=True)
-    order = Column(Integer)
-    added_by_id = Column(Integer, ForeignKey('user.id'))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relations
-    room = relationship("Room", back_populates="tracks", foreign_keys=[room_id])
-    added_by = relationship("User", back_populates="tracks_added", foreign_keys=[added_by_id])
-
-class Message(Base):
-    __tablename__ = "message"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(Integer, ForeignKey('room.id'))
-    user_id = Column(Integer, ForeignKey('user.id'))
-    content = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Relations
-    room = relationship("Room", back_populates="messages")
-    user = relationship("User", back_populates="messages")
-
-
-# ==================== MUSIC PLAYER MODELS ====================
+    # Relationships
+    owner = relationship("User", back_populates="rooms")
+    tracks = relationship("RoomTrack", back_populates="room", cascade="all, delete-orphan")
 
 class Track(Base):
-    """Глобальная таблица треков - метаданные для всех пользователей"""
-    __tablename__ = "track"
-    
-    # Identity (дедупликация по source + source_track_id)
-    id = Column(Integer, primary_key=True, index=True)
-    source = Column(Enum(SourceEnum), nullable=False)
-    source_track_id = Column(String, nullable=False)
-    source_page_url = Column(String, nullable=False)  # Для refresh stream_url
-    
-    # Metadata
-    title = Column(String, nullable=False)
-    artist = Column(String)
-    album = Column(String, nullable=True)
-    duration = Column(Float)  # Секунды
-    genre = Column(String, nullable=True)
-    year = Column(Integer, nullable=True)
-    
-    # Stream URLs (протухают ~24ч)
-    stream_url = Column(String, nullable=False)
-    stream_url_expires_at = Column(DateTime, nullable=False)
-    thumbnail_url = Column(String, nullable=True)
-    
-    # Audio quality
-    bitrate = Column(Integer)  # kbps
-    codec = Column(String)     # mp3, opus, aac
-    
-    # Local storage
-    local_file_path = Column(String, nullable=True)  # Путь к локальному файлу
-    
-    # Global stats
-    total_plays = Column(Integer, default=0)
-    unique_listeners = Column(Integer, default=0)
-    
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relations
-    users = relationship("UserTrack", back_populates="track")
-    playlists = relationship("PlaylistTrack", back_populates="track")
-    
-    __table_args__ = (
-        # Уникальность: один source_track_id на один source
-        UniqueConstraint('source', 'source_track_id', name='uq_track_source'),
-    )
-
-
-class UserTrack(Base):
-    """M2M: библиотека пользователя с персональными данными"""
-    __tablename__ = "user_track"
+    __tablename__ = "tracks"
     
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey('user.id'), nullable=False)
-    track_id = Column(Integer, ForeignKey('track.id'), nullable=False)
+    title = Column(String(200), nullable=False)
+    artist = Column(String(200))
+    album = Column(String(200))
+    duration = Column(Float)  # in seconds
+    url = Column(String(1000))
+    thumbnail_url = Column(String(500))
+    source = Column(String(50))  # youtube, soundcloud, local
+    source_id = Column(String(200))  # ID from the source platform
+    file_path = Column(String(500))  # For local files
+    file_size = Column(Integer)  # in bytes
+    mime_type = Column(String(100))
+    is_processed = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # Персональные данные
-    added_at = Column(DateTime, default=datetime.utcnow)
-    is_favorite = Column(Boolean, default=False)
-    play_count = Column(Integer, default=0)
-    last_played_at = Column(DateTime, nullable=True)
-    
-    # Optional: оценка и заметки
-    user_rating = Column(Integer, nullable=True)  # 1-5 stars
-    user_notes = Column(String, nullable=True)
-    
-    # Relations
-    user = relationship("User", backref="library_tracks")
-    track = relationship("Track", back_populates="users")
-    
-    __table_args__ = (
-        # Уникальность: пользователь не может добавить трек дважды
-        UniqueConstraint('user_id', 'track_id', name='uq_user_track'),
-    )
-
+    # Relationships
+    room_tracks = relationship("RoomTrack", back_populates="track")
 
 class Playlist(Base):
-    """Плейлисты и альбомы пользователя"""
-    __tablename__ = "playlist"
+    __tablename__ = "playlists"
     
     id = Column(Integer, primary_key=True, index=True)
-    owner_id = Column(Integer, ForeignKey('user.id'), nullable=False)
-    
-    name = Column(String, nullable=False)
-    description = Column(String, nullable=True)
-    thumbnail = Column(String, nullable=True)
-    
-    # Type classification
-    is_album = Column(Boolean, default=False)  # True = альбом, False = плейлист
-    
-    # Source tracking (если импортирован)
-    source = Column(Enum(SourceEnum), nullable=True)
-    source_playlist_id = Column(String, nullable=True)
-    
-    # Privacy
+    name = Column(String(200), nullable=False)
+    description = Column(Text)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     is_public = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Stats (автообновляемые)
-    track_count = Column(Integer, default=0)
-    total_duration = Column(Float, default=0)
-    
-    # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
-    # Relations
-    owner = relationship("User", backref="playlists")
-    tracks = relationship("PlaylistTrack", back_populates="playlist", cascade="all, delete-orphan")
+    # Relationships
+    user = relationship("User", back_populates="playlists")
 
-
-class PlaylistTrack(Base):
-    """M2M: треки в плейлисте с порядком"""
-    __tablename__ = "playlist_track"
+class RoomTrack(Base):
+    __tablename__ = "room_tracks"
     
     id = Column(Integer, primary_key=True, index=True)
-    playlist_id = Column(Integer, ForeignKey('playlist.id'), nullable=False)
-    track_id = Column(Integer, ForeignKey('track.id'), nullable=False)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
+    track_id = Column(Integer, ForeignKey("tracks.id"), nullable=False)
+    added_by_id = Column(Integer, ForeignKey("users.id"))
+    position = Column(Integer, default=0)
+    status = Column(SAEnum(TrackStatus), default=TrackStatus.QUEUED)
+    played_at = Column(DateTime(timezone=True))
+    duration_played = Column(Float, default=0.0)  # seconds played
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    order = Column(Integer, nullable=False)  # Порядок в плейлисте
-    added_at = Column(DateTime, default=datetime.utcnow)
+    # Relationships
+    room = relationship("Room", back_populates="tracks")
+    track = relationship("Track", back_populates="room_tracks")
+
+class VoiceInsert(Base):
+    __tablename__ = "voice_inserts"
     
-    # Relations
-    playlist = relationship("Playlist", back_populates="tracks")
-    track = relationship("Track", back_populates="playlists")
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    text = Column(Text, nullable=False)
+    audio_data = Column(LargeBinary)
+    duration = Column(Float)
+    is_processed = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    __table_args__ = (
-        # Уникальность: трек не дублируется в плейлисте
-        UniqueConstraint('playlist_id', 'track_id', name='uq_playlist_track'),
-    )
+    # Relationships
+    user = relationship("User", back_populates="voice_inserts")
+
+class RoomUser(Base):
+    __tablename__ = "room_users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    joined_at = Column(DateTime(timezone=True), server_default=func.now())
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    room = relationship("Room")
+    user = relationship("User")

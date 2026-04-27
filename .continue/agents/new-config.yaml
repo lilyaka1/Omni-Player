@@ -1,0 +1,43 @@
+name: ContinueConfig
+version: 1.0.0
+schema: v1
+
+models:
+  # ======================
+  # CLAUDE MODELS
+  # ======================
+  - name: Claude 4.5 Sonnet
+    provider: anthropic
+    model: claude-sonnet-4.5
+    apiBase: https://api.gloyai.fun/claude
+    apiKey: sk-funpay-HSHmTEz6TQKkuKq9h0KYhsTye099k860YQpKPOkwZ1Khv63Z
+    roles:
+      - chat
+      - edit
+
+  - name: Claude 4.5 Opus
+    provider: anthropic
+    model: claude-opus4.5
+    apiBase: https://api.gloyai.fun/claude
+    apiKey: sk-funpay-HSHmTEz6TQKkuKq9h0KYhsTye099k860YQpKPOkwZ1Khv63Z
+    roles:
+      - chat
+      - edit
+
+  - name: Claude 4.7 Opus
+    provider: anthropic
+    model: claude-opus4.7
+    apiBase: https://api.gloyai.fun/claude
+    apiKey: sk-funpay-HSHmTEz6TQKkuKq9h0KYhsTye099k860YQpKPOkwZ1Khv63Z
+    roles:
+      - chat
+      - edit
+
+  # ======================
+  # EMBEDDING
+  # ======================
+  - name: Nomic-Embed
+    provider: ollama
+    model: nomic-embed-text:latest
+    roles:
+      - embed

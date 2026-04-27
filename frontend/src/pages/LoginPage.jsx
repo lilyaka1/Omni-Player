@@ -32,7 +32,7 @@ export default function LoginPage() {
   const [tab, setTab] = useState('login');
   const [darkMode, setDarkMode] = useState(localStorage.getItem('theme') === 'dark');
 
-  const [loginUsername, setLoginUsername] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
@@ -77,10 +77,10 @@ export default function LoginPage() {
     event.preventDefault();
     setLoginError('');
 
-    const username = loginUsername.trim();
+    const email = loginEmail.trim();
     const password = loginPassword;
 
-    if (!username || !password) {
+    if (!email || !password) {
       setLoginError('Заполните все поля');
       return;
     }
@@ -90,7 +90,7 @@ export default function LoginPage() {
       const response = await fetch('/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ email, password }),
       });
 
       const data = await response.json().catch(() => ({}));
@@ -109,12 +109,12 @@ export default function LoginPage() {
     }
   }
 
-  async function autoLogin(username, password) {
+  async function autoLogin(email, password) {
     try {
       const response = await fetch('/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ email, password }),
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.access_token) {
@@ -170,7 +170,8 @@ export default function LoginPage() {
         return;
       }
 
-      await autoLogin(username, password);
+      // Автологин с email из регистрационной формы (или username@omni-player.local)
+      await autoLogin(email || `${username}@omni-player.local`, password);
     } catch {
       setRegisterError('Ошибка сети');
     } finally {
@@ -204,8 +205,8 @@ export default function LoginPage() {
             {loginError ? <div className="auth-error" id="loginError">{loginError}</div> : <div id="loginError" />}
 
             <div className="form-group-auth">
-              <label htmlFor="loginUsername">Логин</label>
-              <input id="loginUsername" className="input" type="text" value={loginUsername} onChange={(e) => setLoginUsername(e.target.value)} autoComplete="username" required />
+              <label htmlFor="loginEmail">Логин</label>
+              <input id="loginEmail" className="input" type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} autoComplete="email" required />
             </div>
 
             <div className="form-group-auth">

@@ -256,7 +256,7 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
 
     action = data.get("action")
     track_id = data.get("track_id")
-    print(f"Playback control: {action}, track_id: {track_id}")
+    print(f"🎮 [PLAYBACK] Room {room_id}: action={action}, track_id={track_id}")
 
     def _db_play():
         _db = SessionLocal()
@@ -308,31 +308,44 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
     if action == "play":
         res = await asyncio.to_thread(_db_play)
         if not res["ok"]:
-            print(f"play failed: {res['reason']}")
+            print(f"❌ [PLAYBACK] Room {room_id}: play failed - {res['reason']}")
             return
         started_at = res["started_at"]
         is_playing = True
+        print(f"✅ [PLAYBACK] Room {room_id}: DB updated, started_at={started_at}")
+        
         try:
             from app.room.manager import room_manager
             from app.room.providers.soundcloud import soundcloud_client
+            
             if not room_manager.is_live(room_id):
+                print(f"🚀 [PLAYBACK] Room {room_id}: Starting new broadcast")
                 asyncio.create_task(room_manager.start_room(room_id, SessionLocal, soundcloud_client))
             else:
+                print(f"⏭️ [PLAYBACK] Room {room_id}: Broadcast already running, triggering skip")
                 bc = room_manager.broadcasts.get(room_id)
                 if bc:
                     bc.skip_event.set()
                     bc.current_track_id = None
         except Exception as exc:
-            print(f"broadcast error: {exc}")
+            print(f"❌ [PLAYBACK] Room {room_id}: broadcast error: {exc}")
+            import traceback
+            traceback.print_exc()
 
     elif action == "pause":
+        print(f"⏸️ [PLAYBACK] Room {room_id}: Pausing broadcast")
         await asyncio.to_thread(_db_pause)
         try:
             from app.room.manager import room_manager
             if room_manager.is_live(room_id):
+                print(f"🛑 [PLAYBACK] Room {room_id}: Stopping broadcast")
                 await room_manager.stop_room(room_id)
+            else:
+                print(f"ℹ️ [PLAYBACK] Room {room_id}: Broadcast already stopped")
         except Exception as exc:
-            print(f"stop error: {exc}")
+            print(f"❌ [PLAYBACK] Room {room_id}: stop error: {exc}")
+            import traceback
+            traceback.print_exc()
 
     room_state = await asyncio.to_thread(_db_state)
     update_data = {

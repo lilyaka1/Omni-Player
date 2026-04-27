@@ -1,194 +1,95 @@
 # Omni Player
 
-Совместный музыкальный плеер с синхронизацией в реальном времени. Несколько пользователей заходят в одну комнату и слушают музыку вместе — треки с YouTube и SoundCloud, синхронное воспроизведение, чат, управление очередью.
+Многопользовательский музыкальный проигрыватель с поддержкой живого потока и синхронизацией в реальном времени.
 
----
+## 📁 Структура проекта
 
-## Быстрый старт
+```
+.
+├── backend/           # 🔧 Backend (FastAPI)
+│   ├── app/          # Основное приложение
+│   ├── templates/    # HTML шаблоны
+│   ├── downloads/    # Загруженные файлы
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── requirements.txt
+│   └── start.sh      # Скрипт для запуска backend
+│
+├── frontend/         # 🎨 Frontend
+│   ├── frontend-react/  # React приложение (Vite)
+│   ├── static/       # Статические файлы
+│   ├── *.html        # HTML страницы
+│   └── start.sh      # Скрипт для запуска frontend
+│
+├── docker-compose.yml   # Главный docker-compose для всего проекта
+├── start.sh             # Скрипт для запуска всего приложения
+└── README.md
+```
 
-### С Docker (рекомендуется)
+## 🚀 Быстрый старт
+
+### С помощью Docker (рекомендуется)
 
 ```bash
-cp .env.example .env
-# Отредактируй .env — задай SECRET_KEY и POSTGRES_PASSWORD
-docker compose up -d
-# Первый запуск: инициализация БД и создание тестового пользователя
-docker compose exec app python init_db.py
-docker compose exec app python setup_user.py
+# Запуск всех сервисов
+chmod +x start.sh
+./start.sh
 ```
 
-Открыть: http://localhost:3000
+Приложение будет доступно на:
 
-### Локально (для разработки)
+- 📱 Frontend: http://localhost:5173
+- 🔌 Backend API: http://localhost:3000
+- 📚 API Документация: http://localhost:3000/docs
+
+### Локальная разработка
+
+#### Backend
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-# Заполнить .env
-python init_db.py
-python setup_user.py   # создаёт тестового пользователя
-uvicorn app.main:app --port 3000 --reload
+cd backend
+chmod +x start.sh
+./start.sh
 ```
 
-Требования: Python 3.11+, PostgreSQL, ffmpeg
+Backend запустится на http://localhost:8000
 
----
-
-## Архитектура
-
-```
-Браузер → FastAPI (HTTP + WebSocket) → PostgreSQL
-                 ↓
-         yt-dlp + ffmpeg → аудиопоток → Браузер
-```
-
-- **FastAPI** — REST API + WebSocket-сервер
-- **PostgreSQL** — пользователи, комнаты, треки, очередь
-- **yt-dlp** — поиск на YouTube/SoundCloud, получение stream URL
-- **ffmpeg** — транскодирование аудио в mp3 для стриминга
-- **WebSocket** — синхронизация в реальном времени: воспроизведение, чат, очередь
-
----
-
-## Страницы
-
-| URL         | Описание                               |
-| ----------- | ---------------------------------------------- |
-| `/`       | Главная страница                   |
-| `/login`  | Вход / Регистрация              |
-| `/player` | Личная библиотека + поиск |
-| `/user`   | Комнатный плеер                  |
-| `/health` | Health-check API                  |
-
----
-
-## Структура проекта
-
-```
-app/
-  domains/
-    auth/     — JWT авторизация
-    rooms/    — CRUD комнат, очередь, участники
-    tracks/   — поиск и стриминг треков
-  room/       — runtime очереди, broadcast, ffmpeg
-  websocket/  — WS endpoint и handlers
-  player/     — роуты player-страниц
-  admin/      — admin маршруты
-  database/   — SQLAlchemy модели и сессии
-  core/       — конфиг и зависимости
-static/
-  js/         — фронтенд (vanilla JS)
-  css/        — стили
-```
-
----
-
-## API
-
-Интерактивная документация: **http://localhost:3000/docs** (Swagger UI)
-
-Основные эндпоинты:
-
-```
-POST /auth/login              — получить JWT токен
-GET  /rooms                   — список комнат
-POST /rooms                   — создать комнату
-GET  /rooms/{id}              — информация о комнате
-GET  /stream/search/soundcloud — поиск на SoundCloud
-GET  /stream/room/{room_id}/status — статус room broadcast
-GET  /stream/room/{room_id}/stream — mp3 stream комнаты
-WS   /ws/rooms/{room_id}      — WebSocket соединение
-GET  /health                  — health-check
-```
-
-## Быстрая проверка после запуска
+#### Frontend
 
 ```bash
-curl -sS http://localhost:3000/health
-# => {"status":"ok"}
-
-curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:3000/login
-curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:3000/player
-curl -sS -o /dev/null -w '%{http_code}\n' http://localhost:3000/user
-# => 200 / 200 / 200
+cd frontend
+chmod +x start.sh
+./start.sh
 ```
 
----
+Frontend запустится на http://localhost:5173
 
-## Переменные окружения
+## 🛠 Требования
 
-| Переменная            | Описание                                                 |
-| ------------------------------- | ---------------------------------------------------------------- |
-| `DATABASE_URL`                | URL к PostgreSQL                                                |
-| `SECRET_KEY`                  | Секрет для JWT (обязательно поменяй!) |
-| `ALGORITHM`                   | Алгоритм JWT (по умолчанию HS256)             |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Время жизни токена в минутах             |
-| `SOUNDCLOUD_API_URL`          | URL API SoundCloud                                               |
-| `YOUTUBE_API_KEY`             | API ключ YouTube (опционально)                    |
-| `ROOM_TTL_SECONDS`            | Время жизни неактивной комнаты        |
+### Для Docker
 
-Смотри [.env.example](.env.example) для примеров значений.
+- Docker 20.10+
+- Docker Compose 2.0+
 
----
+### Для локальной разработки
 
-## Деплой и передача проекта
+**Backend:**
 
-### Передать проект через Docker-образ (без репозитория)
+- Python 3.10+
+- PostgreSQL 15+
+- FFmpeg
 
-```bash
-# 1. Собрать образ
-docker build -t omni-player .
+**Frontend:**
 
-# 2. Экспортировать в файл
-docker save omni-player | gzip > omni-player.tar.gz
+- Node.js 18+
+- npm 9+
 
-# 3. Отправить файл на другой компьютер (scp, флешка, облако)
+## 📖 Документация
 
-# 4. На другом компьютере — загрузить образ
-docker load < omni-player.tar.gz
+- [Architecture](./ARCHITECTURE.md) - Архитектура приложения
+- [Equalizer](./EQUALIZER.md) - Документация эквалайзера
+- [Quickstart](./QUICKSTART.md) - Быстрый старт
 
-# 5. Запустить через docker compose
-docker compose up -d
-```
+## 📝 Лицензия
 
-### Передать через Docker Hub (публичный/приватный registry)
-
-```bash
-# 1. Логин (один раз)
-docker login
-
-# 2. Собрать и запушить
-docker build -t yourname/omni-player:latest .
-docker push yourname/omni-player:latest
-
-# 3. На другом компьютере
-docker pull yourname/omni-player:latest
-docker compose up -d
-```
-
-> В docker-compose.yml замени `build: .` на `image: yourname/omni-player:latest`.
-
-### Передать через git + Docker Compose (рекомендуется для команды)
-
-```bash
-# 1. Отправить код в репозиторий (GitHub/GitLab/etc.)
-git push origin main
-
-# 2. На другом компьютере
-git clone <repo-url>
-cd omni-player
-cp .env.example .env
-# Заполнить .env
-docker compose up -d
-```
-
----
-
-## Документация
-
-- [ARCHITECTURE.md](ARCHITECTURE.md) — архитектура системы, потоки данных, схема БД
-- [FRONTEND.md](FRONTEND.md) — гайд для фронтендера: все модули JS, API, WebSocket
-- [QUICKSTART.md](QUICKSTART.md) — подробная инструкция по запуску
-- [EQUALIZER.md](EQUALIZER.md) — реализация эквалайзера
+MIT

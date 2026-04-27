@@ -17,6 +17,23 @@ const WSModule = (function () {
   let _watchdogTimer = null;
   let _stateSyncTimer = null;
   let _stateSyncInFlight = false;
+  let _delayedTrackTimer = null;
+  let _delayedTrackSeq = 0;
+  let _trackMetaHoldUntil = 0;
+
+  function getTrackMetaDelayMs() {
+    const v = Number((window.GLOBAL && GLOBAL.trackMetaDelayMs) || 4000);
+    if (!Number.isFinite(v)) return 4000;
+    return Math.max(0, v);
+  }
+
+  function cancelDelayedTrackApply() {
+    _delayedTrackSeq += 1;
+    if (_delayedTrackTimer) {
+      clearTimeout(_delayedTrackTimer);
+      _delayedTrackTimer = null;
+    }
+  }
 
   function flushPendingMessages() {
     if (!GLOBAL.ws || GLOBAL.ws.readyState !== WebSocket.OPEN) return;
@@ -211,6 +228,16 @@ const WSModule = (function () {
           current_time: Number(state.position || 0),
         };
 
+        const incomingId = normalized.current_track && Number(normalized.current_track.id);
+        const currentId = GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id);
+        if (
+          Number.isFinite(incomingId) && Number.isFinite(currentId)
+          && incomingId !== currentId
+          && Date.now() < _trackMetaHoldUntil
+        ) {
+          return;
+        }
+
         if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
           PlayerModule.applyState(normalized);
         }
@@ -383,6 +410,7 @@ const WSModule = (function () {
 
   function handleRoomState(data) {
     if (!data) return;
+    cancelDelayedTrackApply();
 
     const hasIsPlaying = Object.prototype.hasOwnProperty.call(data, 'is_playing')
       || Object.prototype.hasOwnProperty.call(data, 'playing');
@@ -427,6 +455,8 @@ const WSModule = (function () {
 
   function handleTrackChange(data) {
     if (!data) return;
+    cancelDelayedTrackApply();
+    _trackMetaHoldUntil = 0;
     const hasIsPlaying = Object.prototype.hasOwnProperty.call(data, 'is_playing')
       || Object.prototype.hasOwnProperty.call(data, 'playing');
     const hasPosition = Object.prototype.hasOwnProperty.call(data, 'position')
@@ -460,7 +490,28 @@ const WSModule = (function () {
       is_playing: true,
       current_time: typeof base.current_time !== 'undefined' ? base.current_time : 0,
     };
-    handleTrackChange(normalized);
+
+    const delayMs = getTrackMetaDelayMs();
+    if (delayMs <= 0) {
+      handleTrackChange(normalized);
+      return;
+    }
+
+    cancelDelayedTrackApply();
+    _trackMetaHoldUntil = Date.now() + delayMs;
+    const seq = _delayedTrackSeq;
+    if (typeof roomTrace === 'function') {
+      roomTrace('ws.track_changed.delayed', {
+        delayMs,
+        trackId: track && track.id ? track.id : null,
+      });
+    }
+
+    _delayedTrackTimer = setTimeout(() => {
+      if (seq !== _delayedTrackSeq) return;
+      _delayedTrackTimer = null;
+      handleTrackChange(normalized);
+    }, delayMs);
   }
 
   function handlePlaybackStarted(data) {

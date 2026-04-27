@@ -1,25 +1,26 @@
-"""SQLAlchemy session factory и FastAPI-зависимость get_db."""
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.core.config import get_settings
+from app.core.config import settings
+from app.database.models import Base
 
-settings = get_settings()
-
-# pool_size=20: хватит для одновременных слушателей + WS + broadcast
-# pool_pre_ping: переподключение при обрыве idle-соединения
+# Create engine
 engine = create_engine(
     settings.DATABASE_URL,
-    echo=False,
-    pool_size=20,
-    max_overflow=10,
+    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {},
     pool_pre_ping=True,
-    pool_recycle=300,  # переиспользовать соединения каждые 5 минут
+    pool_size=10,
+    max_overflow=20
 )
 
+# Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+def init_db():
+    """Initialize database tables."""
+    Base.metadata.create_all(bind=engine)
 
 def get_db():
+    """Get database session."""
     db = SessionLocal()
     try:
         yield db
