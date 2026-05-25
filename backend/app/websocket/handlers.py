@@ -5,13 +5,15 @@ SQLAlchemy Session не thread-safe.
 """
 import asyncio
 import json
+import time
 from fastapi import WebSocket, status
 
-from app.database.models import Room, RoomTrack, User, Message, SourceEnum, RoomRoleEnum, user_room_association
+from app.database.models import Room, RoomTrack, User, Message, SourceEnum, RoomRoleEnum, user_room_association, Track
 from app.database.session import SessionLocal
 from app.websocket.manager import manager
 from app.domains.auth.service import decode_token
 from app.room.queue import get_room_state
+from app.services.metadata import split_artist_title
 
 
 # -- Connection --
@@ -43,10 +45,16 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                 return {"error": "room_not_found"}
             if not token:
                 return {"error": "no_token"}
-            email = decode_token(token)
-            if not email:
+            user_identifier = decode_token(token)
+            if not user_identifier:
                 return {"error": "invalid_token"}
-            user = _db.query(User).filter(User.email == email).first()
+            user = None
+            if str(user_identifier).isdigit():
+                user = _db.query(User).filter(User.id == int(user_identifier)).first()
+            if not user:
+                user = _db.query(User).filter(
+                    (User.email == user_identifier) | (User.username == user_identifier)
+                ).first()
             if not user:
                 return {"error": "user_not_found"}
             if user.is_blocked:
@@ -138,16 +146,17 @@ async def handle_chat(room_id: int, user, data: dict) -> None:
             _db.add(msg)
             _db.commit()
             _db.refresh(msg)
-            return msg.created_at.isoformat()
+            return {"id": msg.id, "timestamp": msg.created_at.isoformat()}
         finally:
             _db.close()
 
-    ts = await asyncio.to_thread(_save)
+    result = await asyncio.to_thread(_save)
     await manager.broadcast(room_id, json.dumps({
         "type": "chat",
+        "id": result["id"],
         "user": user.username or user.email,
         "content": data.get("content", ""),
-        "timestamp": ts,
+        "timestamp": result["timestamp"],
     }))
 
 
@@ -173,16 +182,38 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
                     ).first()
 
                     if not track:
-                        stream_url = track_data.get("stream_url") or track_data.get("url", "")
+                        raw_stream_url = track_data.get("stream_url") or track_data.get("url", "")
+                        # ── Resolve local file → /api/player/audio/{id} ──
+                        resolved_url = raw_stream_url
+                        if raw_stream_url == "pending://local-upload" or raw_stream_url.startswith("local-upload://"):
+                            src_id = source_track_id
+                            if src_id.isdigit():
+                                orig = _db.query(Track).filter(Track.id == int(src_id)).first()
+                                if orig and orig.local_file_path:
+                                    resolved_url = f"/api/player/audio/{orig.id}"
+                            if resolved_url in ("pending://local-upload", "") or resolved_url.startswith("local-upload://"):
+                                sp_url = track_data.get("source_page_url") or ""
+                                if sp_url.startswith("local-upload://"):
+                                    orig = _db.query(Track).filter(
+                                        Track.source == SourceEnum.LOCAL,
+                                        Track.title == track_data.get("title", ""),
+                                    ).first()
+                                    if orig and orig.local_file_path:
+                                        resolved_url = f"/api/player/audio/{orig.id}"
+
                         max_order = _db.query(RoomTrack).filter(RoomTrack.room_id == room_id).count()
+                        title, artist = split_artist_title(
+                            track_data.get("title", "Unknown"),
+                            track_data.get("artist", "Unknown"),
+                        )
                         track = RoomTrack(
                             room_id=room_id,
                             source=SourceEnum.SOUNDCLOUD,
                             source_track_id=source_track_id,
-                            title=track_data.get("title", "Unknown"),
-                            artist=track_data.get("artist", "Unknown"),
+                            title=title,
+                            artist=artist,
                             duration=track_data.get("duration", 0),
-                            stream_url=stream_url,
+                            stream_url=resolved_url,
                             thumbnail=track_data.get("thumbnail", ""),
                             genre=track_data.get("genre", ""),
                             order=max_order + 1,
@@ -226,7 +257,13 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
                 from app.room.manager import room_manager
                 from app.room.providers.soundcloud import soundcloud_client
                 asyncio.create_task(
-                    room_manager.prefetch_track_url(result["id"], result["source_track_id"], SessionLocal, soundcloud_client)
+                    room_manager.prefetch_track_file(
+                        result["id"],
+                        result.get("source", "soundcloud"),
+                        result["source_track_id"],
+                        SessionLocal,
+                        soundcloud_client,
+                    )
                 )
             except Exception as e:
                 print(f"prefetch error: {e}")
@@ -305,7 +342,25 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
     is_playing = False
     started_at = None
 
-    if action == "play":
+    if action == "next":
+        try:
+            from app.room.queue import advance_track
+            ok = await advance_track(room_id, SessionLocal)
+            if ok:
+                try:
+                    from app.room.manager import room_manager
+                    bc = room_manager.broadcasts.get(room_id)
+                    if bc:
+                        bc.skip_event.set()
+                        bc.current_track_id = None
+                except Exception as exc:
+                    print(f"⚠️ [PLAYBACK] Room {room_id}: next skip signal failed: {exc}")
+                return
+        except Exception as exc:
+            print(f"❌ [PLAYBACK] Room {room_id}: next error: {exc}")
+        is_playing = False
+
+    elif action == "play":
         res = await asyncio.to_thread(_db_play)
         if not res["ok"]:
             print(f"❌ [PLAYBACK] Room {room_id}: play failed - {res['reason']}")
@@ -359,3 +414,81 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
         update_data["current_track"] = room_state["current_track"]
     manager.room_states[room_id].update(update_data)
     await manager.broadcast(room_id, json.dumps({"type": "room_state", "data": manager.room_states[room_id]}))
+
+    # Явно broadcast track_changed после play — RoomPage слушает именно этот тип события
+    if is_playing and room_state.get("current_track"):
+        track_dict = {
+            "id": room_state["current_track"].get("id"),
+            "title": room_state["current_track"].get("title", ""),
+            "artist": room_state["current_track"].get("artist", ""),
+            "duration": room_state["current_track"].get("duration") or 0,
+            "thumbnail": room_state["current_track"].get("thumbnail") or "",
+            "genre": room_state["current_track"].get("genre") or "",
+            "started_at": int(time.time()),
+        }
+        await manager.broadcast(room_id, json.dumps({
+            "type": "track_changed",
+            "track": track_dict,
+        }))
+
+
+# -- Reorder queue --
+
+async def handle_reorder_queue(room_id: int, data: dict) -> None:
+    """Обработка reorder_queue: обновление порядка треков в комнате."""
+    new_order = data.get("order", [])
+    if not isinstance(new_order, list) or not new_order:
+        return
+
+    def _db_reorder():
+        _db = SessionLocal()
+        try:
+            for idx, track_id in enumerate(new_order):
+                track = _db.query(RoomTrack).filter(
+                    RoomTrack.id == int(track_id),
+                    RoomTrack.room_id == room_id,
+                ).first()
+                if track:
+                    track.order = idx
+            _db.commit()
+            return True
+        except Exception as e:
+            print(f"reorder_queue error: {e}")
+            _db.rollback()
+            return False
+        finally:
+            _db.close()
+
+    ok = await asyncio.to_thread(_db_reorder)
+    if not ok:
+        return
+
+    # Fetch updated queue for broadcast
+    def _db_queue():
+        _db = SessionLocal()
+        try:
+            tracks = (
+                _db.query(RoomTrack)
+                .filter(RoomTrack.room_id == room_id)
+                .order_by(RoomTrack.order, RoomTrack.id)
+                .all()
+            )
+            return [
+                {
+                    "id": t.id,
+                    "title": t.title,
+                    "artist": t.artist,
+                    "duration": t.duration or 0,
+                    "thumbnail": t.thumbnail or "",
+                    "genre": t.genre or "",
+                }
+                for t in tracks
+            ]
+        finally:
+            _db.close()
+
+    queue = await asyncio.to_thread(_db_queue)
+    await manager.broadcast(room_id, json.dumps({
+        "type": "queue_reordered",
+        "queue": queue,
+    }))

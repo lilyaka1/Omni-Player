@@ -1,23 +1,29 @@
 from typing import List, Optional
-from sqlalchemy.orm import Session
+
 from sqlalchemy import desc
-from app.database.models import Room, RoomType, User, RoomUser, RoomTrack
+from sqlalchemy.orm import Session
+
+from app.database.models import Room, User, UserRoom
 
 class RoomService:
     def __init__(self, db: Session):
         self.db = db
     
     def create_room(self, name: str, owner: User, description: Optional[str] = None,
-                    room_type: RoomType = RoomType.PUBLIC, max_users: int = 50) -> Room:
+                    room_type: Optional[str] = None, max_users: int = 50,
+                    cover_url: Optional[str] = None, genre: Optional[str] = None) -> Room:
         """Create a new room."""
         room = Room(
             name=name,
             description=description,
-            room_type=room_type,
-            owner_id=owner.id,
-            max_users=max_users,
+            creator_id=owner.id,
             is_active=True,
-            current_users=0
+            cover_url=cover_url,
+            genre=genre,
+            room_type=room_type or "public",
+            max_users=max_users,
+            is_playing=False,
+            queue_mode="normal"
         )
         self.db.add(room)
         self.db.commit()
@@ -32,8 +38,8 @@ class RoomService:
         """Get list of rooms."""
         query = self.db.query(Room)
         if public_only:
-            query = query.filter(Room.room_type == RoomType.PUBLIC)
-        return query.order_by(desc(Room.current_users)).offset(skip).limit(limit).all()
+            query = query.filter(Room.is_active == True)
+        return query.order_by(desc(Room.created_at)).offset(skip).limit(limit).all()
     
     def update_room(self, room_id: int, **kwargs) -> Optional[Room]:
         """Update a room."""
@@ -65,26 +71,24 @@ class RoomService:
         if not room or not room.is_active:
             return False
         
-        if room.current_users >= room.max_users:
-            return False
-        
         # Check if user is already in room
-        existing = self.db.query(RoomUser).filter(
-            RoomUser.room_id == room_id,
-            RoomUser.user_id == user.id,
-            RoomUser.is_active == True
+        existing = self.db.query(UserRoom).filter(
+            UserRoom.room_id == room_id,
+            UserRoom.user_id == user.id,
         ).first()
         
         if existing:
+            if existing.is_banned:
+                existing.is_banned = False
+                self.db.commit()
             return True
         
-        room_user = RoomUser(
+        room_user = UserRoom(
             room_id=room_id,
             user_id=user.id,
-            is_active=True
+            is_banned=False
         )
         self.db.add(room_user)
-        room.current_users += 1
         self.db.commit()
         return True
     
@@ -94,32 +98,40 @@ class RoomService:
         if not room:
             return False
         
-        room_user = self.db.query(RoomUser).filter(
-            RoomUser.room_id == room_id,
-            RoomUser.user_id == user.id,
-            RoomUser.is_active == True
+        room_user = self.db.query(UserRoom).filter(
+            UserRoom.room_id == room_id,
+            UserRoom.user_id == user.id,
+            UserRoom.is_banned == False
         ).first()
         
         if not room_user:
             return False
         
-        room_user.is_active = False
-        room.current_users = max(0, room.current_users - 1)
+        room_user.is_banned = True
         self.db.commit()
         return True
     
-    def get_room_users(self, room_id: int) -> List[RoomUser]:
+    def get_room_users(self, room_id: int) -> List[User]:
         """Get all active users in a room."""
-        return self.db.query(RoomUser).filter(
-            RoomUser.room_id == room_id,
-            RoomUser.is_active == True
-        ).all()
+        return (
+            self.db.query(User)
+            .join(UserRoom, UserRoom.user_id == User.id)
+            .filter(
+                UserRoom.room_id == room_id,
+                UserRoom.is_banned == False,
+            )
+            .all()
+        )
     
     def get_user_rooms(self, user_id: int) -> List[Room]:
         """Get all rooms a user is in."""
-        room_ids = self.db.query(RoomUser.room_id).filter(
-            RoomUser.user_id == user_id,
-            RoomUser.is_active == True
-        ).subquery()
-        
-        return self.db.query(Room).filter(Room.id.in_(room_ids)).all()
+        return (
+            self.db.query(Room)
+            .join(UserRoom, UserRoom.room_id == Room.id)
+            .filter(
+                UserRoom.user_id == user_id,
+                UserRoom.is_banned == False,
+            )
+            .order_by(desc(Room.created_at))
+            .all()
+        )

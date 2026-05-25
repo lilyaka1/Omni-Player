@@ -417,8 +417,8 @@ const WSModule = (function () {
     const hasPosition = Object.prototype.hasOwnProperty.call(data, 'position')
       || Object.prototype.hasOwnProperty.call(data, 'current_time');
 
-    GLOBAL.currentTrack = data.current_track || data.track || null;
-    GLOBAL.isPlaying = inferPlayingFromPayload(data, hasIsPlaying);
+    const incomingTrack = data.current_track || data.track || null;
+    const incomingPlaying = inferPlayingFromPayload(data, hasIsPlaying);
     if (hasPosition) {
       const pos = Number(data.position ?? data.current_time);
       GLOBAL.currentPosition = Number.isFinite(pos) ? pos : (GLOBAL.currentPosition || 0);
@@ -443,6 +443,9 @@ const WSModule = (function () {
       PlayerModule.applyState(data);
     }
 
+    GLOBAL.currentTrack = incomingTrack;
+    GLOBAL.isPlaying = incomingPlaying;
+
     // Do not clobber queue if room_state does not carry full queue payload.
     if (typeof QueueModule !== 'undefined' && Array.isArray(data.queue)) {
       QueueModule.setQueue(data.queue || []);
@@ -462,8 +465,8 @@ const WSModule = (function () {
     const hasPosition = Object.prototype.hasOwnProperty.call(data, 'position')
       || Object.prototype.hasOwnProperty.call(data, 'current_time');
 
-    GLOBAL.currentTrack = data.current_track || data.track || null;
-    GLOBAL.isPlaying = inferPlayingFromPayload(data, hasIsPlaying);
+    const incomingTrack = data.current_track || data.track || null;
+    const incomingPlaying = inferPlayingFromPayload(data, hasIsPlaying);
     if (hasPosition) {
       const pos = Number(data.position ?? data.current_time);
       GLOBAL.currentPosition = Number.isFinite(pos) ? pos : (GLOBAL.currentPosition || 0);
@@ -478,6 +481,9 @@ const WSModule = (function () {
     if (typeof PlayerModule !== 'undefined') {
       PlayerModule.applyState(data);
     }
+
+    GLOBAL.currentTrack = incomingTrack;
+    GLOBAL.isPlaying = incomingPlaying;
   }
 
   function handleTrackChangedLegacy(msg) {

@@ -29,10 +29,14 @@ async def handle_insert_message(
     if not msg_type.startswith("insert_"):
         return
 
+    role_name = getattr(user_role, "value", user_role)
+    role_name = str(role_name).lower()
+
     # ── insert_create ────────────────────────────────────────────────────
     if msg_type == "insert_create":
         text = data.get("text", "").strip()
         voice_id = data.get("voice_id", "en_US-libritts-high")
+        play_after_track_id = data.get("play_after_track_id")
 
         # Валидация
         if not text:
@@ -46,7 +50,7 @@ async def handle_insert_message(
             return
 
         # Проверка роли
-        if user_role not in ("admin", "moderator"):
+        if role_name not in ("admin", "moderator", "owner", "dj"):
             await websocket.send_json({"type": "error", "msg": "Forbidden"})
             return
 
@@ -63,6 +67,7 @@ async def handle_insert_message(
                 admin_id=user_id,
                 text=text,
                 voice_id=voice_id,
+                play_after_track_id=play_after_track_id,
             )
 
             await websocket.send_json({
@@ -96,7 +101,7 @@ async def handle_insert_message(
                 return
 
             # Проверяем роль
-            if user_role not in ("admin", "moderator") and user_id != insert.admin_id:
+            if role_name not in ("admin", "moderator", "owner", "dj") and user_id != insert.admin_id:
                 await websocket.send_json({"type": "error", "msg": "Forbidden"})
                 return
 
@@ -128,6 +133,7 @@ async def handle_insert_message(
                         "text": i.text,
                         "status": i.status,
                         "scheduled_at": i.scheduled_at.isoformat(),
+                        "play_after_track_id": i.play_after_track_id,
                         "audio_url": f"/tts/{i.content_hash}.mp3" if i.audio_path else None,
                         "duration_sec": i.duration_sec,
                     }
@@ -139,7 +145,7 @@ async def handle_insert_message(
 
     # ── insert_clear (очистка активных вставок комнаты) ───────────────────
     elif msg_type == "insert_clear":
-        if user_role not in ("admin", "moderator"):
+        if role_name not in ("admin", "moderator", "owner", "dj"):
             await websocket.send_json({"type": "error", "msg": "Forbidden"})
             return
 

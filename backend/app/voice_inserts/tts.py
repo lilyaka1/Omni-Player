@@ -1,11 +1,12 @@
 """
-Piper TTS generation via subprocess + asyncio.
-Minimal dependencies: only standard library + external binaries (piper, ffmpeg, ffprobe).
+Piper TTS + SO-VITS-SVC pipeline для Omni Player.
+Minimal deps: piper-tts, so-vits-svc-fork, ffmpeg.
 """
 import asyncio
 import hashlib
 import os
 import re
+import shutil
 import logging
 from pathlib import Path
 from dataclasses import dataclass
@@ -14,24 +15,96 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────────
-TTS_AUDIO_DIR: Path = Path(os.getenv(
-    "TTS_AUDIO_DIR",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "tts_audio"),
+_backend_root = Path(__file__).parent.parent.parent
+TTS_AUDIO_DIR: Path = Path(os.getenv("TTS_AUDIO_DIR", str(_backend_root / "tts_audio")))
+TTS_MODEL_DIR: Path = Path(os.getenv("TTS_MODEL_DIR", str(_backend_root / "tts_models")))
+RVC_MODEL_DIR: Path = Path(os.getenv(
+    "RVC_MODEL_DIR",
+    str(_backend_root.parent / "Kanye West - Weights Model" / "Kanye West (RVC) 1000 Epoch"),
 ))
-TTS_MODEL_DIR: Path = Path(os.getenv("TTS_MODEL_DIR", ""))
+RVC_ENABLED = os.getenv("RVC_ENABLED", "true").lower() == "true"
+RVC_DEVICE = os.getenv("RVC_DEVICE", "cpu")
 MAX_CONCURRENT = int(os.getenv("TTS_MAX_CONCURRENT", "2"))
-GENERATION_TIMEOUT_SEC = 15
-PIPER_BIN = os.getenv("PIPER_BIN", "piper")
+GENERATION_TIMEOUT_SEC = int(os.getenv("TTS_TIMEOUT_SEC", "30"))
 
-# Semaphore: не больше N параллельных Piper процессов
+
+def _resolve_piper_bin() -> str:
+    env_bin = os.getenv("PIPER_BIN")
+    if env_bin:
+        if os.path.isfile(env_bin) and os.access(env_bin, os.X_OK):
+            return env_bin
+        found = shutil.which(env_bin)
+        if found:
+            return found
+
+    venv_bin = _backend_root / "venv" / "bin" / "piper"
+    if venv_bin.exists() and os.access(venv_bin, os.X_OK):
+        return str(venv_bin)
+
+    found = shutil.which("piper")
+    if found:
+        return found
+
+    return "piper"
+
+
+PIPER_BIN = _resolve_piper_bin()
+log.info(f"Piper binary resolved to: {PIPER_BIN}")
+
+
+# ── Semaphores ──────────────────────────────────────────────────────────────
 _tts_semaphore: Optional[asyncio.Semaphore] = None
+_rvc_semaphore: Optional[asyncio.Semaphore] = None
 
 
-def _get_semaphore() -> asyncio.Semaphore:
+def _get_tts_semaphore() -> asyncio.Semaphore:
     global _tts_semaphore
     if _tts_semaphore is None:
         _tts_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
     return _tts_semaphore
+
+
+def _get_rvc_semaphore() -> asyncio.Semaphore:
+    global _rvc_semaphore
+    if _rvc_semaphore is None:
+        _rvc_semaphore = asyncio.Semaphore(1)  # SO-VITS heavy → 1 за раз
+    return _rvc_semaphore
+
+
+# ── Lazy SO-VITS engine ──────────────────────────────────────────────────────
+_sovits_engine = None
+_sovits_init_lock = asyncio.Lock()
+
+
+async def _get_sovits_engine():
+    """Ленивая инициализация SO-VITS-SVC движка."""
+    global _sovits_engine
+    if _sovits_engine is not None:
+        return _sovits_engine
+
+    async with _sovits_init_lock:
+        if _sovits_engine is not None:
+            return _sovits_engine
+
+        if not RVC_ENABLED:
+            return None
+
+        if not (RVC_MODEL_DIR / "model.pth").exists():
+            log.warning(f"RVC model not found at {RVC_MODEL_DIR}, RVC disabled")
+            return None
+
+        def _load():
+            from .rvc_sovits import SOVITSRVCEngine
+            return SOVITSRVCEngine(str(RVC_MODEL_DIR), device=RVC_DEVICE)
+
+        try:
+            _sovits_engine = await asyncio.to_thread(_load)
+            log.info("✅ SO-VITS engine ready (lazy)")
+        except Exception as e:
+            log.error(f"❌ SO-VITS init failed: {e}")
+            _sovits_engine = None
+
+    return _sovits_engine
 
 
 # ── Result ──────────────────────────────────────────────────────────────────
@@ -41,11 +114,16 @@ class TTSResult:
     audio_path: Optional[str] = None
     duration_sec: Optional[float] = None
     error: Optional[str] = None
+    is_kanye: bool = False  # True если применён RVC
+
+    @property
+    def used_rvc(self) -> bool:
+        return self.is_kanye
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 async def _get_duration(path: Path) -> Optional[float]:
-    """FFprobe: точная длительность в секундах."""
+    """FFprobe: длительность в секундах."""
     proc = await asyncio.create_subprocess_exec(
         "ffprobe", "-v", "error",
         "-show_entries", "format=duration",
@@ -77,34 +155,25 @@ async def _convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> bool:
     return code == 0
 
 
-def _content_hash(text: str, voice_id: str) -> str:
-    return hashlib.sha256(f"{text}:{voice_id}".encode()).hexdigest()[:16]
+def _content_hash(text: str, voice_id: str, use_rvc: bool = True) -> str:
+    suffix = "_rvc" if use_rvc else "_base"
+    return hashlib.sha256(f"{text}:{voice_id}{suffix}".encode()).hexdigest()[:16]
 
 
 def _resolve_model_path(voice_id: str) -> Optional[Path]:
-    """Найти модель: сначала TTS_MODEL_DIR, потом в PATH."""
-    # 1. Явный путь
-    if TTS_MODEL_DIR:
-        explicit = TTS_MODEL_DIR / voice_id
-        if explicit.exists():
-            return explicit
-        # может быть файл напрямую
-        if explicit.suffix == ".onnx" and explicit.exists():
-            return explicit
-
-    # 2. Имя файла в PATH или /app/tts_models/
-    for base in [Path("/app/tts_models"), Path("/usr/local/share/piper"), Path("/usr/share/piper")]:
+    """Найти Piper модель."""
+    for base in [TTS_MODEL_DIR, _backend_root / "tts_models", _backend_root.parent / "tts_models"]:
+        if not base.exists():
+            continue
         for ext in ("", ".onnx"):
             candidate = base / f"{voice_id}{ext}"
             if candidate.exists():
                 return candidate
-        # Модель может лежать как voice_id/voice_id.onnx
         subdir = base / voice_id
         if subdir.is_dir():
             onnx_files = list(subdir.glob("*.onnx"))
             if onnx_files:
                 return onnx_files[0]
-
     return None
 
 
@@ -112,114 +181,130 @@ def _resolve_model_path(voice_id: str) -> Optional[Path]:
 async def generate_speech(
     text: str,
     voice_id: str = "en_US-libritts-high",
+    use_rvc: bool = True,
+    rvc_pitch: int = 0,
+    index_rate: float = 0.75,
+    protect: float = 0.33,  # совместимость со старым API
 ) -> TTSResult:
     """
-    Piper TTS → MP3.
-
-    Pipeline:
-      1. Хеш → cache check
-      2. Найти модель
-      3. piper subprocess (wav)
-      4. ffmpeg → mp3
-      5. ffprobe → duration
+    Piper TTS → WAV → [SO-VITS RVC] → MP3.
     """
     text = text.strip()
     if not text:
         return TTSResult(success=False, error="Empty text")
 
-    content_hash = _content_hash(text, voice_id)
     TTS_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    mp3_path = TTS_AUDIO_DIR / f"{content_hash}.mp3"
+    will_use_rvc = use_rvc and RVC_ENABLED
+    content_hash = _content_hash(text, voice_id, will_use_rvc)
 
-    # ── Cache hit ──────────────────────────────────────────────────────
-    if mp3_path.exists() and mp3_path.stat().st_size > 100:
-        dur = await _get_duration(mp3_path)
-        return TTSResult(success=True, audio_path=str(mp3_path), duration_sec=dur)
+    # Cache check
+    final_mp3 = TTS_AUDIO_DIR / f"{content_hash}.mp3"
+    if final_mp3.exists() and final_mp3.stat().st_size > 100:
+        dur = await _get_duration(final_mp3)
+        return TTSResult(
+            success=True, audio_path=str(final_mp3),
+            duration_sec=dur, is_kanye=will_use_rvc,
+        )
 
-    # ── Find model ──────────────────────────────────────────────────────
+    # Find Piper model
     model_path = _resolve_model_path(voice_id)
     if model_path is None:
-        # Пробуем дефолтную
         voice_id = "en_US-libritts-high"
         model_path = _resolve_model_path(voice_id)
         if model_path is None:
             return TTSResult(success=False, error=f"Model not found: {voice_id}")
 
-    wav_path = TTS_AUDIO_DIR / f"{content_hash}.wav"
+    base_wav = TTS_AUDIO_DIR / f"{content_hash}_base.wav"
+    rvc_wav = TTS_AUDIO_DIR / f"{content_hash}_rvc.wav"
 
-    # ── Piper subprocess ────────────────────────────────────────────────
+    # ── Piper TTS ──────────────────────────────────────────────────────
     try:
-        async with _get_semaphore():
+        async with _get_tts_semaphore():
             proc = await asyncio.create_subprocess_exec(
                 PIPER_BIN,
                 "--model", str(model_path),
-                "--output_file", str(wav_path),
+                "--output_file", str(base_wav),
                 "--sentence_silence", "0.2",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-
             _, err = await asyncio.wait_for(
                 proc.communicate(input=text.encode("utf-8")),
                 timeout=GENERATION_TIMEOUT_SEC,
             )
-
     except asyncio.TimeoutError:
-        log.warning(f"Piper timeout (>15s): {text[:40]}")
+        log.warning(f"Piper timeout: {text[:40]}")
         try:
             proc.kill()
         except Exception:
             pass
-        return TTSResult(success=False, error="Generation timeout (>15s)")
-
+        return TTSResult(success=False, error="Generation timeout")
     except FileNotFoundError:
-        return TTSResult(success=False, error="Piper binary not found. Install piper-tts.")
-
-    except OSError as e:
-        if e.errno == 28:
-            return TTSResult(success=False, error="Disk full")
-        return TTSResult(success=False, error=str(e))
-
+        return TTSResult(success=False, error="Piper binary not found")
     except Exception as e:
         return TTSResult(success=False, error=str(e))
 
-    # ── Check output ────────────────────────────────────────────────────
     if proc.returncode != 0:
         err_msg = err.decode(errors="replace").strip()
-        log.warning(f"Piper error: {err_msg}")
-
-        # Попытка очистить текст от проблемных символов и повторить один раз
         cleaned = re.sub(r"[^\w\sа-яёА-ЯЁ.,!?'-]", " ", text)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if cleaned and cleaned != text:
-            log.info(f"Retrying with cleaned text: {cleaned[:60]}")
-            return await generate_speech(cleaned, voice_id)
+            return await generate_speech(
+                cleaned, voice_id, use_rvc,
+                rvc_pitch=rvc_pitch, index_rate=index_rate, protect=protect,
+            )
+        return TTSResult(success=False, error=f"Piper error: {err_msg[:120]}")
 
-        return TTSResult(success=False, error=f"Piper error: {err_msg[:100]}")
-
-    if not wav_path.exists() or wav_path.stat().st_size < 100:
+    if not base_wav.exists() or base_wav.stat().st_size < 100:
         return TTSResult(success=False, error="Wav file missing or empty")
 
-    # ── FFmpeg: wav → mp3 ───────────────────────────────────────────────
-    ok = await _convert_wav_to_mp3(wav_path, mp3_path)
+    # ── SO-VITS-SVC ───────────────────────────────────────────────────
+    rvc_applied = False
+    rvc_source: Optional[Path] = None
+    if will_use_rvc:
+        engine = await _get_sovits_engine()
+        if engine is not None:
+            async with _get_rvc_semaphore():
+                def _convert():
+                    return engine.convert_voice(
+                        str(base_wav), str(rvc_wav),
+                        index_rate=index_rate, pitch_shift=rvc_pitch,
+                    )
+                try:
+                    ok = await asyncio.to_thread(_convert)
+                except Exception as e:
+                    log.error(f"SO-VITS conversion error: {e}")
+                    ok = False
+
+            if ok and rvc_wav.exists() and rvc_wav.stat().st_size > 100:
+                rvc_applied = True
+                rvc_source = rvc_wav
+            else:
+                log.warning("SO-VITS failed, falling back to base voice")
+
+    # ── Encode to MP3 ───────────────────────────────────────────────────
+    source_wav = rvc_source if rvc_applied else base_wav
+    ok = await _convert_wav_to_mp3(source_wav, final_mp3)
     if not ok:
-        return TTSResult(success=False, error="FFmpeg conversion failed")
+        return TTSResult(success=False, error="FFmpeg encoding failed")
 
-    # ── Cleanup wav ─────────────────────────────────────────────────────
-    try:
-        wav_path.unlink()
-    except OSError:
-        pass
+    # Cleanup temp wavs
+    for f in (base_wav, rvc_wav):
+        try:
+            f.unlink()
+        except OSError:
+            pass
 
-    # ── Duration ─────────────────────────────────────────────────────────
-    dur = await _get_duration(mp3_path)
+    dur = await _get_duration(final_mp3)
+    log.info(f"TTS generated: {content_hash} ({dur:.1f}s, rvc={rvc_applied})")
+    return TTSResult(
+        success=True, audio_path=str(final_mp3),
+        duration_sec=dur, is_kanye=rvc_applied,
+    )
 
-    log.info(f"TTS generated: {content_hash} ({dur if dur is not None else 0:.1f}s)")
-    return TTSResult(success=True, audio_path=str(mp3_path), duration_sec=dur)
 
-
-# ── Pre-generation (for cache warming) ─────────────────────────────────────
+# ── Pre-generation ──────────────────────────────────────────────────────────
 COMMON_PHRASES = [
     "Всем привет! Сейчас играет",
     "Следующий трек",
@@ -230,17 +315,42 @@ COMMON_PHRASES = [
 
 
 async def prewarm_cache() -> int:
-    """Генерирует COMMON_PHRASES в фоне. Вызывается при старте приложения."""
+    """Генерирует COMMON_PHRASES при старте приложения."""
     generated = 0
     for phrase in COMMON_PHRASES:
-        h = _content_hash(phrase, "en_US-libritts-high")
+        h = _content_hash(phrase, "en_US-libritts-high", use_rvc=True)
         path = TTS_AUDIO_DIR / f"{h}.mp3"
         if path.exists():
             continue
-        result = await generate_speech(phrase)
+        result = await generate_speech(phrase, use_rvc=True)
         if result.success:
             generated += 1
             log.info(f"Prewarmed: {phrase[:40]}")
         else:
             log.warning(f"Prewarm failed: {phrase[:40]} - {result.error}")
     return generated
+
+
+# ── TTS Manager wrapper ─────────────────────────────────────────────────────
+class TTSManager:
+    def __init__(self):
+        self.model_name = "en_US-libritts-high"
+        self.device = RVC_DEVICE
+        self._initialized = True
+
+    def is_initialized(self):
+        return True
+
+    def initialize(self, model_name="en_US-libritts-high", device="cpu"):
+        self.model_name = model_name
+        self.device = device
+        return True
+
+    def generate(self, text, speaker_id=None):
+        return asyncio.run(generate_speech(text, voice_id=self.model_name))
+
+    def get_available_models(self):
+        return ["en_US-libritts-high"]
+
+
+tts_manager = TTSManager()

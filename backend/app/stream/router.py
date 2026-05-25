@@ -4,17 +4,28 @@ Stream routing - handle audio streaming endpoints
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from app.core.dependencies import get_current_user
+from app.database.models import Room
+from app.database.models import RoomTrack
 from app.database.session import get_db
-from app.database.models import Room, Track, RoomTrack
+from app.room.queue import get_room_state
+from app.room.manager import room_manager
+from app.database.session import SessionLocal
+from app.room.providers.soundcloud import soundcloud_client
 from pathlib import Path
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
+
+def _get_download_status(stream_url: str) -> str:
+    value = str(stream_url or '').strip()
+    if value and Path(value).is_file():
+        return 'ready'
+    return 'downloading'
+
 @router.get("/room/{room_id}/status")
 async def get_stream_status(room_id: int, db: Session = Depends(get_db)):
     """Get room broadcast status"""
-    from app.room.manager import room_manager
-    
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
@@ -47,7 +58,6 @@ async def get_room_stream(room_id: int, db: Session = Depends(get_db)):
     Returns HTTP audio stream from FFmpeg broadcast.
     """
     from fastapi.responses import StreamingResponse
-    from app.room.manager import room_manager
     import time
     
     print(f"🎧 [STREAM] Room {room_id}: New connection request")
@@ -58,6 +68,17 @@ async def get_room_stream(room_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Room not found")
     
     print(f"📊 [STREAM] Room {room_id}: DB state - is_playing={room.is_playing}, current_track_id={room.now_playing_track_id}")
+
+    # If playback has just been started, the websocket handler can mark the room
+    # as playing before the broadcast task finishes booting. Wait a short grace
+    # window for the live broadcast to appear instead of failing immediately.
+    if room.is_playing and not room_manager.is_live(room_id):
+        import asyncio
+
+        for _ in range(20):
+            await asyncio.sleep(0.25)
+            if room_manager.is_live(room_id):
+                break
     
     # Check if broadcast is running
     is_live = room_manager.is_live(room_id)
@@ -118,6 +139,46 @@ async def get_room_stream(room_id: int, db: Session = Depends(get_db)):
             "X-Content-Type-Options": "nosniff",
         }
     )
+
+
+@router.post("/room/{room_id}/start")
+async def start_room_stream(room_id: int, db: Session = Depends(get_db)):
+    """Legacy compatibility endpoint: start room broadcast."""
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    if room_manager.is_live(room_id):
+        return {"success": True, "live": True}
+
+    await room_manager.start_room(room_id, SessionLocal, soundcloud_client)
+    return {"success": True, "live": True}
+
+
+@router.post("/room/{room_id}/stop")
+async def stop_room_stream(
+    room_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Stop room broadcast — only admin/owner/dj."""
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    user_role = current_user.role if hasattr(current_user, "role") else "user"
+    is_owner = getattr(room, "creator_id", None) == current_user.id
+    if user_role not in ("admin", "dj") and not is_owner:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not room_manager.is_live(room_id):
+        return {"success": True, "live": False}
+
+    await room_manager.stop_room(room_id)
+    return {"success": True, "live": False}
 
 @router.get("/room/{room_id}/hls/playlist.m3u8")
 async def get_hls_playlist(room_id: int, db: Session = Depends(get_db)):
@@ -209,15 +270,34 @@ async def get_room_queue(room_id: int, db: Session = Depends(get_db)):
     
     tracks = []
     for rt in room_tracks:
-        track = rt.track
-        if track:
-            tracks.append({
-                "id": track.id,
-                "title": track.title,
-                "artist": track.artist,
-                "duration": track.duration,
-                "stream_url": track.stream_url,
-                "thumbnail_url": track.thumbnail_url,
-            })
+        tracks.append({
+            "id": rt.id,
+            "title": rt.title,
+            "artist": rt.artist,
+            "duration": rt.duration,
+            "stream_url": rt.stream_url,
+            "download_status": _get_download_status(rt.stream_url),
+            "thumbnail": rt.thumbnail or "",
+            "genre": rt.genre or "",
+            "added_by_id": rt.added_by_id,
+        })
+
+    if not tracks:
+        state = get_room_state(db, room) or {}
+        current_track = state.get("current_track")
+        if current_track:
+            tracks = [
+                {
+                    "id": current_track.get("id"),
+                    "title": current_track.get("title"),
+                    "artist": current_track.get("artist"),
+                    "duration": current_track.get("duration"),
+                    "stream_url": current_track.get("stream_url") or "",
+                    "download_status": _get_download_status(current_track.get("stream_url") or ""),
+                    "thumbnail": current_track.get("thumbnail") or "",
+                    "genre": current_track.get("genre") or "",
+                    "added_by_id": None,
+                }
+            ]
     
     return {"tracks": tracks}

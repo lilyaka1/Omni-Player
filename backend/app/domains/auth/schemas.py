@@ -19,7 +19,8 @@ class UserResponse(BaseModel):
     display_name: Optional[str] = None
     avatar_url: Optional[str] = None
     role: str
-    is_active: bool
+    can_create_rooms: bool = True
+    is_active: bool = True
     created_at: Optional[datetime] = None
     
     class Config:

@@ -13,6 +13,9 @@ fi
 
 echo "✅ Python 3 найден"
 
+# macOS OpenMP fix (для FAISS и других numpy-based libs)
+export KMP_DUPLICATE_LIB_OK=TRUE
+
 # Создание venv если не существует
 if [ ! -d "venv" ]; then
     echo "📦 Создание виртуального окружения..."
@@ -41,5 +44,10 @@ echo "🚀 Запуск FastAPI server на http://localhost:8000"
 echo "📚 API документация: http://localhost:8000/docs"
 echo "======================================"
 echo ""
+
+# Установка переменных окружения
+export TTS_AUDIO_DIR="./tts_audio"
+export OUTPUT_DIR="./output"
+export RVC_MODEL_PATH="../Kanye West - Weights Model/Kanye West (RVC) 1000 Epoch"
 
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

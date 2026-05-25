@@ -2,7 +2,7 @@
 Music Player API routes
 """
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi import UploadFile, File
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -26,6 +26,38 @@ CHUNK_SIZE = 1024 * 1024
 
 
 router = APIRouter(prefix="/api/player", tags=["player"])
+
+
+def _sanitize_downloads_subdir(raw: Optional[str]) -> Optional[str]:
+    if raw is None:
+        return None
+    value = str(raw).strip().replace("\\", "/")
+    if not value:
+        return None
+    value = value.strip("/")
+    if not value:
+        return None
+    # Запрещаем выход из корневой папки downloads.
+    if ".." in value or value.startswith("/"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="downloads_dir must be a relative folder inside downloads",
+        )
+    return value
+
+
+def _resolve_user_downloads_dir(current_user: User) -> Path:
+    base_downloads = Path(settings.DOWNLOADS_DIR).resolve()
+    user_subdir = _sanitize_downloads_subdir(current_user.downloads_subdir) or f"users/{current_user.id}"
+    path = (base_downloads / user_subdir).resolve()
+    # Дополнительная защита от path traversal.
+    if base_downloads not in path.parents and path != base_downloads:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Resolved downloads path is outside downloads root",
+        )
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 # ==================== Schemas ====================
@@ -68,7 +100,12 @@ async def add_to_library(
     """Добавить трек в библиотеку"""
     service = TrackService(db)
     try:
-        track = await service.add_track_to_library(current_user.id, request.url)
+        user_downloads_dir = str(_resolve_user_downloads_dir(current_user))
+        track = await service.add_track_to_library(
+            current_user.id,
+            request.url,
+            target_downloads_dir=user_downloads_dir,
+        )
         return {
             "success": True,
             "track": {
@@ -87,15 +124,24 @@ async def add_to_library(
         )
 
 
+@router.post("/add-by-url")
+async def add_to_library_legacy(
+    request: AddTrackRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Legacy alias for frontend compatibility."""
+    return await add_to_library(request=request, current_user=current_user, db=db)
+
+
 @router.post("/library/upload")
 async def upload_local_files(
     files: list[UploadFile] = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Загрузить локальные аудиофайлы в постоянную папку downloads."""
-    downloads_dir = Path(settings.DOWNLOADS_DIR)
-    downloads_dir.mkdir(parents=True, exist_ok=True)
+    """Загрузить локальные аудиофайлы в персональную папку пользователя."""
+    downloads_dir = _resolve_user_downloads_dir(current_user)
 
     added_tracks = []
 
@@ -171,16 +217,164 @@ async def remove_from_library(
         UserTrack.user_id == current_user.id,
         UserTrack.track_id == track_id
     ).first()
-    
+
     if not user_track:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Track not found in library"
         )
-    
+
     db.delete(user_track)
     db.commit()
     return {"success": True, "message": "Track removed from library"}
+
+
+# ==================== Track Metadata / Cover / Redownload ====================
+
+class UpdateTrackMetaRequest(BaseModel):
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    album: Optional[str] = None
+    genre: Optional[str] = None
+    year: Optional[int] = None
+
+
+def _ensure_user_owns_track(db: Session, user_id: int, track_id: int) -> Track:
+    """Удостовериться, что трек есть в библиотеке пользователя.
+    Возвращает Track, иначе бросает 404."""
+    user_track = db.query(UserTrack).filter(
+        UserTrack.user_id == user_id,
+        UserTrack.track_id == track_id,
+    ).first()
+    if not user_track:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Track not found in your library",
+        )
+    track = db.query(Track).filter(Track.id == track_id).first()
+    if not track:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Track not found"
+        )
+    return track
+
+
+@router.patch("/library/{track_id}")
+async def update_track_metadata(
+    track_id: int,
+    payload: UpdateTrackMetaRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Редактирование метаданных трека (только из своей библиотеки)."""
+    track = _ensure_user_owns_track(db, current_user.id, track_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    for k, v in data.items():
+        if hasattr(track, k):
+            setattr(track, k, v)
+    db.commit()
+    db.refresh(track)
+    return {
+        "success": True,
+        "track": {
+            "id": track.id,
+            "title": track.title,
+            "artist": track.artist,
+            "album": track.album,
+            "genre": track.genre,
+            "year": track.year,
+            "thumbnail_url": track.thumbnail_url,
+        },
+    }
+
+
+@router.post("/library/{track_id}/cover")
+async def upload_track_cover(
+    track_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Загрузить/заменить обложку трека (хранится в /static/uploads/covers)."""
+    track = _ensure_user_owns_track(db, current_user.id, track_id)
+
+    suffix = Path(file.filename or "").suffix.lower() or ".jpg"
+    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported image type: {suffix}",
+        )
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file"
+        )
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image too large (max 5 MB)",
+        )
+
+    backend_root = Path(__file__).resolve().parents[2]
+    covers_dir = backend_root / "static" / "uploads" / "covers"
+    covers_dir.mkdir(parents=True, exist_ok=True)
+
+    fname = f"track_{track.id}_{uuid4().hex}{suffix}"
+    out = covers_dir / fname
+    with open(out, "wb") as f:
+        f.write(contents)
+
+    public_url = f"/static/uploads/covers/{fname}"
+    track.thumbnail_url = public_url
+    db.commit()
+
+    return {"success": True, "thumbnail_url": public_url}
+
+
+@router.post("/library/{track_id}/redownload")
+async def redownload_track(
+    track_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Повторно скачать аудио файл трека (если у трека есть source_page_url)."""
+    track = _ensure_user_owns_track(db, current_user.id, track_id)
+
+    if not track.source_page_url or track.source_page_url.startswith("local-upload://"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This track cannot be redownloaded (no source URL)",
+        )
+
+    service = TrackService(db)
+    try:
+        info = await service._extract_metadata(track.source_page_url)
+        local_path = await service._download_audio(track.source_page_url, info or {})
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Redownload failed: {e}",
+        )
+
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Download did not produce a file",
+        )
+
+    track.local_file_path = local_path
+    track.stream_url = f"/api/player/audio/{track.id}"
+    track.stream_url_expires_at = datetime.utcnow() + timedelta(days=3650)
+    db.commit()
+    db.refresh(track)
+    return {
+        "success": True,
+        "track_id": track.id,
+        "local_file_path": track.local_file_path,
+        "stream_url": track.stream_url,
+    }
 
 
 # ==================== Track Endpoints ====================
@@ -238,9 +432,14 @@ async def get_audio_file(
     bearer = authorization.split(" ")[-1] if authorization else None
     raw_token = bearer or token
     if raw_token:
-        email = decode_token(raw_token)
-        if email:
-            current_user = db.query(User).filter(User.email == email).first()
+        user_identifier = decode_token(raw_token)
+        if user_identifier:
+            if str(user_identifier).isdigit():
+                current_user = db.query(User).filter(User.id == int(user_identifier)).first()
+            if not current_user:
+                current_user = db.query(User).filter(
+                    (User.email == user_identifier) | (User.username == user_identifier)
+                ).first()
 
     if not current_user:
         raise HTTPException(
@@ -261,21 +460,51 @@ async def get_audio_file(
         )
     
     track = db.query(Track).filter(Track.id == track_id).first()
-    
-    if not track or not track.local_file_path:
+
+    if not track:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Audio file not found"
+            detail="Track not found"
         )
-    
-    if not os.path.exists(track.local_file_path):
+
+    local_path = track.local_file_path
+    # Поддерживаем старые относительные пути вида downloads/file.mp3.
+    if local_path and not os.path.isabs(local_path):
+        candidate = os.path.join("/app", local_path)
+        if os.path.exists(candidate):
+            local_path = candidate
+
+    # Если локального файла нет, но есть внешний stream_url — отдаём редирект.
+    if (not local_path or not os.path.exists(local_path)) and track.stream_url:
+        stream_url = str(track.stream_url)
+        if stream_url.startswith("http://") or stream_url.startswith("https://"):
+            return RedirectResponse(url=stream_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    if not local_path or not os.path.exists(local_path):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Audio file does not exist on disk"
         )
 
-    file_size = os.path.getsize(track.local_file_path)
-    media_type, _ = mimetypes.guess_type(track.local_file_path)
+    # ── Быстрая валидация ffmpeg ──
+    try:
+        from app.room.ffmpeg import validate_audio_file
+        v = validate_audio_file(local_path, timeout=8)
+        if not v.get("ok"):
+            print(f"⚠️ [get_audio_file] track={track_id}: audio broken — {v.get('error')}")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Audio file is corrupted or unreadable: {v.get('error', 'unknown error')}"
+            )
+        print(f"✅ [get_audio_file] track={track_id}: valid ({v.get('duration', '?')}s {v.get('codec')})")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"⚠️ [get_audio_file] validation error: {e}")
+        # Не блокируем отдачу, если валидация не сработала
+
+    file_size = os.path.getsize(local_path)
+    media_type, _ = mimetypes.guess_type(local_path)
     media_type = media_type or "audio/mpeg"
 
     def file_chunk_generator(path: str, start: int, end: int):
@@ -325,14 +554,14 @@ async def get_audio_file(
         }
 
         return StreamingResponse(
-            file_chunk_generator(track.local_file_path, start, end),
+            file_chunk_generator(local_path, start, end),
             status_code=status.HTTP_206_PARTIAL_CONTENT,
             media_type=media_type,
             headers=headers,
         )
     
     return FileResponse(
-        track.local_file_path,
+        local_path,
         media_type=media_type,
         headers=base_headers,
     )
@@ -348,30 +577,75 @@ class UpdateSettingsRequest(BaseModel):
 async def get_settings_endpoint(
     current_user: User = Depends(get_current_user)
 ):
-    """Получить настройки плеера"""
+    """Получить настройки загрузок текущего пользователя."""
+    path = _resolve_user_downloads_dir(current_user)
     return {
-        "downloads_dir": settings.DOWNLOADS_DIR
+        "downloads_dir": _sanitize_downloads_subdir(current_user.downloads_subdir) or f"users/{current_user.id}",
+        "downloads_path": str(path),
     }
 
 
 @router.post("/settings")
 async def update_settings_endpoint(
     request: UpdateSettingsRequest,
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Обновить настройки плеера (только для текущей сессии)"""
-    if request.downloads_dir:
-        settings.DOWNLOADS_DIR = request.downloads_dir
-        # Создать папку если не существует
-        os.makedirs(request.downloads_dir, exist_ok=True)
+    """Обновить пользовательскую подпапку загрузок (внутри settings.DOWNLOADS_DIR)."""
+    normalized = _sanitize_downloads_subdir(request.downloads_dir)
+    if normalized is None:
+        normalized = f"users/{current_user.id}"
+
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    user.downloads_subdir = normalized
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    resolved = _resolve_user_downloads_dir(user)
     
     return {
         "success": True,
-        "downloads_dir": settings.DOWNLOADS_DIR
+        "downloads_dir": normalized,
+        "downloads_path": str(resolved),
     }
 
 
 # ==================== Search ====================
+
+@router.get("/search")
+async def search_tracks(
+    q: str = Query(..., min_length=1, alias="q"),
+    source: str = Query("youtube"),
+    limit: int = Query(20, ge=1, le=50),
+    current_user: User = Depends(get_current_user),
+):
+    """Совместимый endpoint поиска треков для фронтенда (/api/player/search?q=...&source=...)."""
+    try:
+        source_normalized = (source or "youtube").strip().lower()
+        if source_normalized == "soundcloud":
+            tracks = await tracks_service.search_soundcloud(q, limit=limit)
+        elif source_normalized == "youtube":
+            tracks = await tracks_service.search_youtube(q, limit=limit)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported source. Use 'youtube' or 'soundcloud'.",
+            )
+        return {"results": tracks, "tracks": tracks}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search failed: {str(e)}",
+        )
 
 @router.get("/search/soundcloud")
 async def search_soundcloud_tracks(
@@ -405,3 +679,51 @@ async def search_youtube_tracks(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Search failed: {str(e)}",
         )
+
+
+# ==================== Audio Validation ====================
+
+@router.post("/validate/{track_id}")
+async def validate_track_audio(
+    track_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Проверить аудиофайл трека на валидность (ffprobe).
+
+    Фронтенд вызывает после загрузки local-файла или перед добавлением в очередь.
+    """
+    track = db.query(Track).filter(Track.id == track_id).first()
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    # Допускаем проверку по library ownership или по source
+    if track.source != SourceEnum.LOCAL and not track.local_file_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Track has no local file to validate",
+        )
+
+    path = track.local_file_path
+    if not path or not os.path.exists(path):
+        return {
+            "ok": False,
+            "track_id": track_id,
+            "error": "file_not_found",
+            "is_broken": True,
+        }
+
+    try:
+        from app.room.ffmpeg import validate_audio_file
+        result = validate_audio_file(path, timeout=15)
+        return {
+            "ok": result.get("ok", False),
+            "track_id": track_id,
+            "duration": result.get("duration"),
+            "codec": result.get("codec"),
+            "bitrate": result.get("bitrate"),
+            "error": result.get("error"),
+            "is_broken": result.get("is_broken", False),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Validation failed: {e}")

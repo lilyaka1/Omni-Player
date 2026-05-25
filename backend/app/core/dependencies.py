@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
 from app.room.manager import RoomManager
 from app.database.models import User
-from jose import jwt
+from jose import JWTError, jwt
 
 security = HTTPBearer(auto_error=False)
 
@@ -19,11 +19,15 @@ def get_db() -> Generator[Session, None, None]:
 
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-    db: Session = Depends(get_db)
-) -> Optional[User]:
-    """Get current user from JWT token."""
+    db: Session = Depends(get_db),
+) -> User:
+    """Get authenticated user from JWT token or raise 401."""
     if credentials is None:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     token = credentials.credentials
     try:
@@ -33,13 +37,30 @@ def get_current_user(
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM]
         )
-        user_id: str = payload.get("sub")
-        if user_id is None:
+        user_id_raw = payload.get("sub")
+        if user_id_raw is None:
             return None
-    except jwt.PyJWTError:
-        return None
+        user_id = int(user_id_raw)
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
     user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 def get_room_manager() -> RoomManager:
@@ -62,10 +83,13 @@ async def get_current_user_ws(
             settings.SECRET_KEY,
             algorithms=[settings.ALGORITHM]
         )
-        user_id: str = payload.get("sub")
-        if user_id is None:
+        user_id_raw = payload.get("sub")
+        if user_id_raw is None:
             return None
+        user_id = int(user_id_raw)
     except jwt.PyJWTError:
+        return None
+    except (TypeError, ValueError):
         return None
     
     user = db.query(User).filter(User.id == user_id).first()

@@ -1,5 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { loadScriptsSequentially } from '../legacy/utils/scripts';
+import RoomLobby from '../components/RoomLobby';
 
 const roomScriptUrls = [
   '/static/js/room/globals.js?v=20260406',
@@ -13,8 +14,25 @@ const roomScriptUrls = [
   '/static/js/room/equalizer-ui.js?v=20260406',
 ];
 
+function getRoomIdFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get('room_id');
+    return id ? Number(id) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function RoomPage() {
+  // Сначала пользователь видит lobby (заглушку перед подключением).
+  // Только после явного "Войти" монтируем тяжёлую часть с ws/стримом.
+  const roomId = getRoomIdFromUrl();
+  const [joined, setJoined] = useState(false);
+
   useEffect(() => {
+    if (!joined) return undefined;
+
     let cancelled = false;
 
     async function initRoom() {
@@ -95,7 +113,17 @@ export default function RoomPage() {
       }
       delete window.__cfClick;
     };
-  }, []);
+  }, [joined]);
+
+  if (!joined) {
+    return (
+      <RoomLobby
+        roomId={roomId}
+        onBack={() => { window.location.href = '/'; }}
+        onJoin={() => setJoined(true)}
+      />
+    );
+  }
 
   return (
     <>

@@ -12,6 +12,7 @@ import yt_dlp
 
 from app.database.models import Track, UserTrack, Playlist, PlaylistTrack, SourceEnum
 from app.core.config import get_settings
+from app.services.metadata import split_artist_title
 
 settings = get_settings()
 
@@ -40,7 +41,12 @@ class TrackService:
     def __init__(self, db: Session):
         self.db = db
     
-    async def add_track_to_library(self, user_id: int, track_url: str) -> Track:
+    async def add_track_to_library(
+        self,
+        user_id: int,
+        track_url: str,
+        target_downloads_dir: Optional[str] = None,
+    ) -> Track:
         """
         Добавить трек в библиотеку пользователя
         Если трек новый - извлечь метаданные через yt-dlp
@@ -59,7 +65,10 @@ class TrackService:
                 existing = await self.refresh_stream_url(existing)
         else:
             # Извлечь метаданные через yt-dlp
-            existing = await self.create_track_from_url(track_url)
+            existing = await self.create_track_from_url(
+                track_url,
+                target_downloads_dir=target_downloads_dir,
+            )
         
         # Добавить в библиотеку юзера (если еще нет)
         user_track = self.db.query(UserTrack).filter(
@@ -74,7 +83,12 @@ class TrackService:
         
         return existing
     
-    async def create_track_from_url(self, url: str, download: bool = True) -> Track:
+    async def create_track_from_url(
+        self,
+        url: str,
+        download: bool = True,
+        target_downloads_dir: Optional[str] = None,
+    ) -> Track:
         """Создать Track из URL (извлечь метаданные и опционально скачать файл)"""
         info = await self._extract_metadata(url)
         
@@ -83,14 +97,23 @@ class TrackService:
         # Скачать аудиофайл если download=True
         local_file_path = None
         if download:
-            local_file_path = await self._download_audio(url, info)
+            local_file_path = await self._download_audio(
+                url,
+                info,
+                target_downloads_dir=target_downloads_dir,
+            )
         
+        title, artist = split_artist_title(
+            info.get('title', 'Unknown'),
+            info.get('uploader') or info.get('artist') or info.get('channel'),
+        )
+
         track = Track(
             source=source,
             source_track_id=track_id,
             source_page_url=url,
-            title=info.get('title', 'Unknown'),
-            artist=info.get('uploader') or info.get('artist') or info.get('channel'),
+            title=title,
+            artist=artist,
             duration=info.get('duration'),
             stream_url=info.get('url', ''),
             stream_url_expires_at=datetime.utcnow() + timedelta(hours=24),
@@ -133,12 +156,17 @@ class TrackService:
         
         return await asyncio.to_thread(_sync_extract)
     
-    async def _download_audio(self, url: str, info: Dict) -> Optional[str]:
+    async def _download_audio(
+        self,
+        url: str,
+        info: Dict,
+        target_downloads_dir: Optional[str] = None,
+    ) -> Optional[str]:
         """Скачать аудиофайл локально"""
         def _sync_download():
             try:
                 # Создать папку downloads если не существует
-                downloads_dir = Path(settings.DOWNLOADS_DIR)
+                downloads_dir = Path(target_downloads_dir or settings.DOWNLOADS_DIR)
                 downloads_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Безопасное имя файла
@@ -194,7 +222,7 @@ class TrackService:
                     "duration": track.duration,
                     "stream_url": track.stream_url,
                     "thumbnail_url": track.thumbnail_url,
-                    "source": track.source.value,
+                    "source": track.source.value if hasattr(track.source, "value") else str(track.source),
                     "local_file_path": track.local_file_path,
                 },
                 "user_data": {

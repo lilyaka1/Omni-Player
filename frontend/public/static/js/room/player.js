@@ -57,6 +57,12 @@ const PlayerModule = (function () {
     return Boolean(GLOBAL.roomId && GLOBAL.currentTrack);
   }
 
+  function canControlRoomPlayback() {
+    return GLOBAL.userRole === 'owner'
+      || GLOBAL.userRole === 'admin'
+      || GLOBAL.userRole === 'dj';
+  }
+
   function ensureProgressTicker() {
     if (_progressTimer) return;
     _progressTimer = setInterval(() => {
@@ -75,17 +81,9 @@ const PlayerModule = (function () {
   }
 
   function ensureAutoNextWatcher() {
-    // Room mode: server controls all track transitions, never auto-skip
-    if (isRoomRadioMode()) return;
-    
     if (_autoNextTimer) return;
     _autoNextTimer = setInterval(() => {
-      // Extra safety: also check here
-      if (isRoomRadioMode()) {
-        clearInterval(_autoNextTimer);
-        _autoNextTimer = null;
-        return;
-      }
+      if (isRoomRadioMode()) return;
       if (GLOBAL.userRole !== 'owner') return;
       if (!GLOBAL.isPlaying) return;
       if (!GLOBAL.currentTrack || !GLOBAL.currentTrack.id) return;
@@ -104,15 +102,15 @@ const PlayerModule = (function () {
 
   function syncControlsByRole() {
     const isOwner = GLOBAL.userRole === 'owner';
+    const canControlRoom = canControlRoomPlayback();
     const roomMode = isRoomRadioMode();
     const canSeek = isOwner && !roomMode;
-    const canTransport = isOwner && !roomMode;
     const canToggleListen = roomMode || isOwner;
 
     [btnPlay, btnPrev, btnNext].forEach((btn) => {
       if (!btn) return;
-      btn.disabled = !isOwner;
-      btn.classList.toggle('ctrl-btn-disabled', !isOwner);
+      btn.disabled = !roomMode && !isOwner;
+      btn.classList.toggle('ctrl-btn-disabled', !roomMode && !isOwner);
     });
     if (btnPlay) {
       btnPlay.disabled = !canToggleListen;
@@ -121,6 +119,7 @@ const PlayerModule = (function () {
 
     [btnPrev, btnNext].forEach((btn) => {
       if (!btn) return;
+      const canTransport = roomMode ? canControlRoom : isOwner;
       btn.disabled = !canTransport;
       btn.classList.toggle('ctrl-btn-disabled', !canTransport);
     });
@@ -192,9 +191,9 @@ const PlayerModule = (function () {
     });
 
     audio?.addEventListener('ended', () => {
-      // Для room-radio сервер сам управляет переходом треков.
-      if (isRoomRadioMode()) return;
-      // Для локального режима: автоматически переходим к следующему треку через WS.
+      if (isRoomRadioMode()) {
+        return;
+      }
       _pendingAutoNext = true;
       nextTrack();
     });
@@ -304,6 +303,10 @@ const PlayerModule = (function () {
       || (_pendingAutoNext && trackChanged)
       || (trackChanged && wasPlayingBefore && GLOBAL.userRole === 'listener');
 
+    if (isRoomRadioMode() && GLOBAL.userRole === 'listener' && GLOBAL.listenerAttached === false) {
+      shouldAutoPlay = false;
+    }
+
     if (isRoomRadioMode() && GLOBAL.localStreamPaused) {
       shouldAutoPlay = false;
     }
@@ -328,9 +331,12 @@ const PlayerModule = (function () {
       _autoNextSentForTrackId = null;
     }
 
+    const shouldStartAudio = shouldAutoPlay && (trackChanged || !wasPlayingBefore);
+    const preserveSamePlayingAudio = shouldAutoPlay && wasPlayingBefore && !trackChanged;
+
     // Обновить трек
     if (currentTrack) {
-      setTrack(currentTrack, position, shouldAutoPlay);
+      setTrack(currentTrack, position, shouldStartAudio, !preserveSamePlayingAudio);
     } else {
       setNoTrack();
     }
@@ -355,7 +361,7 @@ const PlayerModule = (function () {
     setPlayIcon(GLOBAL.isPlaying);
   }
 
-  function setTrack(track, position, autoPlay) {
+  function setTrack(track, position, autoPlay, allowPause = true) {
     const prevTrackId = GLOBAL.currentTrack && GLOBAL.currentTrack.id;
     const incomingTrackId = track && track.id;
     const trackChanged = !prevTrackId || !incomingTrackId || prevTrackId !== incomingTrackId;
@@ -392,19 +398,18 @@ const PlayerModule = (function () {
           audio.src = resolvedSrc;
           audio.load();
           if (autoPlay) audio.play().catch(() => {});
-          else audio.pause();
+          else if (allowPause) audio.pause();
         }
       } else {
         // Не перезагружаем одинаковый трек, только синхронизируем play/pause.
         if (autoPlay && audio.paused) {
-          if (typeof StreamModule !== 'undefined') {
-            // В room-mode это активирует retry после раннего 503 до старта эфира.
+          if (typeof StreamModule !== 'undefined' && !isRoomRadioMode()) {
             StreamModule.assignAudio(audio, track, true);
           } else {
             audio.play().catch(() => {});
           }
         }
-        if (!autoPlay && !audio.paused) audio.pause();
+        if (!autoPlay && allowPause && !audio.paused) audio.pause();
       }
 
       if (Number.isFinite(position)) {
@@ -499,59 +504,74 @@ const PlayerModule = (function () {
     const justSentPlay = _lastControlAction === 'play' && (now - _lastControlAt) < 2500;
     const waitingForStreamStart = now < _playIntentUntil;
 
-    let action = 'play';
-    let shouldSendCommand = true;
-    if (roomMode) {
-      const shouldStartLocal = GLOBAL.localStreamPaused || !localPlaying;
+    if (roomMode && !canControlRoomPlayback()) {
+      const shouldAttach = GLOBAL.localStreamPaused || !localPlaying;
 
-      if (shouldStartLocal) {
+      if (shouldAttach) {
         GLOBAL.localStreamPaused = false;
+        GLOBAL.listenerAttached = true;
         _playIntentUntil = now + 12000;
+
         const selectedId = pickPlayableTrackId();
         const candidateTrack = (GLOBAL.currentTrack && GLOBAL.currentTrack.id)
           ? GLOBAL.currentTrack
           : (Array.isArray(GLOBAL.queue) ? (GLOBAL.queue.find(t => t.id === selectedId) || GLOBAL.queue[0]) : null);
 
-        if (candidateTrack && audio && typeof StreamModule !== 'undefined') {
-        // КРИТИЧНО: Принудительно очищаем src и буфер для переподключения к live-стриму
+        if (!candidateTrack || !audio) {
+          showToast('Не удалось подключиться к стриму', 'error');
+          return;
+        }
+
+        if (typeof StreamModule !== 'undefined') {
+          StreamModule.assignAudio(audio, candidateTrack, true);
+        } else {
+          const resolvedSrc = candidateTrack.stream_url || candidateTrack.url || '';
+          if (!resolvedSrc) {
+            showToast('У трека пока нет stream URL, попробуйте следующий', 'error');
+            return;
+          }
+          audio.src = resolvedSrc;
+          audio.load();
+          audio.play().catch(() => {});
+        }
+
+        if (typeof roomTrace === 'function') {
+          roomTrace('player.togglePlay.listener', { action: 'attach', track_id: selectedId || null });
+        }
+      } else {
+        GLOBAL.localStreamPaused = true;
+        GLOBAL.listenerAttached = false;
+        _playIntentUntil = 0;
         if (audio) {
           audio.pause();
           audio.src = '';
           audio.load();
-          console.log('[togglePlay] Cleared audio buffer for reconnection');
-        }
-          StreamModule.assignAudio(audio, candidateTrack, true);
-        }
-        if (typeof roomTrace === 'function') {
-          roomTrace('player.togglePlay.local', { action: 'play-local', track_id: selectedId || null });
-        }
-      } else {
-        GLOBAL.localStreamPaused = true;
-        _playIntentUntil = 0;
-        if (audio && !audio.paused) {
-          audio.pause();
         }
         if (typeof GLOBAL !== 'undefined') GLOBAL.streamConnected = false;
         if (typeof roomTrace === 'function') {
-          roomTrace('player.togglePlay.local', { action: 'pause-local' });
+          roomTrace('player.togglePlay.listener', { action: 'detach' });
         }
       }
       return;
     }
 
-    // If server says playing but local audio isn't playing, try to recover locally
+    let action = 'play';
+    let shouldSendCommand = true;
+
+    // Non-room mode: If server says playing but local audio isn't playing, try to recover locally
     if (serverPlaying && !localPlaying && audio) {
       if (!GLOBAL.streamConnected && (justSentPlay || waitingForStreamStart)) {
-        // Stream still connecting, try to play locally but DON'T send pause command
         audio.play().catch(() => {});
-        shouldSendCommand = false; // Don't toggle to pause
+        shouldSendCommand = false;
       } else if (!GLOBAL.streamConnected) {
-        // Stream completely down, resync with server
         const selectedId = pickPlayableTrackId();
         _playIntentUntil = now + 12000;
         _lastControlAction = 'play';
         _lastControlAt = now;
         console.log('[togglePlay] Stream down, resyncing play');
+        if (typeof roomTrace === 'function') {
+          roomTrace('player.togglePlay.resync', { action: 'play', track_id: selectedId || null });
+        }
         WSModule.sendWS('playback_control', selectedId ? { action: 'play', track_id: selectedId } : { action: 'play' });
         if (typeof StreamModule !== 'undefined') {
           const candidateTrack = (GLOBAL.currentTrack && GLOBAL.currentTrack.id)
@@ -563,42 +583,24 @@ const PlayerModule = (function () {
         }
         return;
       } else {
-        // Stream connected, safely play local audio
         audio.play().catch(() => {});
         shouldSendCommand = false;
       }
     }
 
-    // Determine action based on current state
+    // Determine action based on current state (non-room mode)
     if (shouldSendCommand) {
-      if (roomMode) {
-        // In room mode backend room_state is authoritative.
-        if (serverPlaying) {
-          if (justSentPlay || waitingForStreamStart) {
-            console.log('[togglePlay] Ignoring pause during play startup window');
-            return;
-          }
-          action = 'pause';
-        } else {
-          action = 'play';
-        }
-      } else {
-      // In room mode, trust local playback readiness over stale server flag.
-      // If button shows "play" and local audio is not playing, force a play command.
-      if (roomMode && !localPlaying && !GLOBAL.streamConnected) {
-        action = 'play';
-      } else if (serverPlaying || localPlaying) {
-        // Already playing, toggle to pause (unless we just sent play)
+      if (serverPlaying || localPlaying) {
         if (justSentPlay || waitingForStreamStart) {
-          // We just started play, don't immediately pause
           console.log('[togglePlay] Ignoring toggle during play startup window');
+          if (typeof roomTrace === 'function') {
+            roomTrace('player.togglePlay.ignore', { reason: 'startup-window' });
+          }
           return;
         }
         action = 'pause';
       } else {
-        // Not playing, toggle to play
         action = 'play';
-      }
       }
     }
 
@@ -649,10 +651,14 @@ const PlayerModule = (function () {
 
   function nextTrack() {
     if (isRoomRadioMode()) {
-      showToast('В режиме радио переключение треков доступно только в live admin', 'error');
+      if (!canControlRoomPlayback()) {
+        showToast('В режиме радио переключение треков доступно только для control-ролей', 'error');
+        return;
+      }
+    }
+    if (!isRoomRadioMode() && GLOBAL.userRole !== 'owner') {
       return;
     }
-    if (GLOBAL.userRole !== 'owner') return;
     const now = Date.now();
     if (now - _lastNextAt < 1800) return;
     _lastNextAt = now;

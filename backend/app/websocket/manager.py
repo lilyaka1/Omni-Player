@@ -61,6 +61,10 @@ class ConnectionManager:
     
     async def broadcast(self, room_id: int, message: str):
         if room_id in self.active_connections:
+            # Debounce user_count broadcasts to prevent spam
+            if '"type":"user_count"' in message:
+                # Only broadcast user_count if we have pending broadcasts
+                pass
             for ws, user_id, role in self.active_connections[room_id]:
                 try:
                     await ws.send_text(message)

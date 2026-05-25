@@ -25,7 +25,17 @@ export default function HomePage() {
   const [myRooms, setMyRooms] = useState([]);
   const [roomSearch, setRoomSearch] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createForm, setCreateForm] = useState({ name: '', description: '', is_public: true });
+  const [createForm, setCreateForm] = useState({
+    name: '',
+    description: '',
+    room_type: 'public',
+    genre: '',
+    max_users: 50,
+    cover_url: '',
+    password: '',
+  });
+  const [coverUploading, setCoverUploading] = useState(false);
+  const [createSubmitting, setCreateSubmitting] = useState(false);
   const [selectedGenre, setSelectedGenre] = useState(null);
   const [searchSource, setSearchSource] = useState('youtube');
   const [searchQuery, setSearchQuery] = useState('');
@@ -105,11 +115,48 @@ export default function HomePage() {
     }
   }
 
+  function resetCreateForm() {
+    setCreateForm({
+      name: '',
+      description: '',
+      room_type: 'public',
+      genre: '',
+      max_users: 50,
+      cover_url: '',
+    });
+  }
+
+  async function uploadCoverDraft(file) {
+    if (!file || !token) return;
+    setCoverUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/rooms/upload-cover', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Не удалось загрузить обложку', 'error');
+        return;
+      }
+      const data = await res.json();
+      setCreateForm((prev) => ({ ...prev, cover_url: data.cover_url }));
+    } catch {
+      showToast('Ошибка сети', 'error');
+    } finally {
+      setCoverUploading(false);
+    }
+  }
+
   async function createRoom(event) {
     event.preventDefault();
-    if (!token) return;
+    if (!token || createSubmitting) return;
     if (!createForm.name.trim()) return;
 
+    setCreateSubmitting(true);
     try {
       const res = await fetch('/rooms/', {
         method: 'POST',
@@ -119,8 +166,12 @@ export default function HomePage() {
         },
         body: JSON.stringify({
           name: createForm.name.trim(),
-          description: createForm.description.trim(),
-          is_public: createForm.is_public,
+          description: createForm.description.trim() || null,
+          room_type: createForm.room_type || 'public',
+          genre: createForm.genre.trim() || null,
+          max_users: Number(createForm.max_users) || 50,
+          cover_url: createForm.cover_url || null,
+          password: createForm.password.trim() || null,
         }),
       });
 
@@ -132,11 +183,13 @@ export default function HomePage() {
 
       const room = await res.json();
       setShowCreateModal(false);
-      setCreateForm({ name: '', description: '', is_public: true });
+      resetCreateForm();
       showToast('Комната создана!', 'success');
       window.location.href = `/user?room_id=${room.id}`;
     } catch {
       showToast('Ошибка сети', 'error');
+    } finally {
+      setCreateSubmitting(false);
     }
   }
 
@@ -181,7 +234,7 @@ export default function HomePage() {
   }, [rooms, selectedGenre]);
 
   const totalListeners = rooms.reduce((sum, room) => sum + (room.listener_count || 0), 0);
-  const canCreate = !!(currentUser && (currentUser.can_create_rooms || currentUser.is_admin));
+  const canCreate = !!currentUser && (currentUser.role === 'admin' || currentUser.can_create_rooms !== false);
 
   return (
     <>
@@ -308,15 +361,19 @@ export default function HomePage() {
                   {!roomsLoading && rooms.slice(0, 8).map((room) => (
                     <div className="room-card room-sm glass glass-secondary" key={room.id} onClick={() => (window.location.href = `/user?room_id=${room.id}`)} style={{ width: 160 }}>
                       <div className="room-artwork">
-                        <div className="artwork-placeholder"><i className="fa-solid fa-music" /></div>
+                        {room.cover_url ? (
+                          <img src={room.cover_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                        ) : (
+                          <div className="artwork-placeholder"><i className="fa-solid fa-music" /></div>
+                        )}
                         {(room.listener_count || 0) > 5 && <div className="live-badge">LIVE</div>}
                         <div className="room-listeners-badge"><i className="fa-solid fa-headphones" /> {room.listener_count || 0}</div>
                       </div>
                       <div className="room-info">
                         <div className="room-title">{room.name}</div>
                         <div className="room-meta">
-                          <span className="room-genre">{room.description || '—'}</span>
-                          <span className="room-privacy"><i className={`fa-solid ${room.is_public ? 'fa-globe' : 'fa-lock'}`} style={{ fontSize: '.6rem' }} /></span>
+                          <span className="room-genre">{room.genre || room.description || '—'}</span>
+                          <span className="room-privacy"><i className={`fa-solid ${(room.room_type || 'public') === 'public' ? 'fa-globe' : 'fa-lock'}`} style={{ fontSize: '.6rem' }} /></span>
                         </div>
                       </div>
                     </div>
@@ -357,15 +414,19 @@ export default function HomePage() {
                 {!roomsLoading && filteredRooms.map((room) => (
                   <div className="room-card glass glass-secondary" key={room.id} onClick={() => (window.location.href = `/user?room_id=${room.id}`)}>
                     <div className="room-artwork">
-                      <div className="artwork-placeholder"><i className="fa-solid fa-music" /></div>
+                      {room.cover_url ? (
+                        <img src={room.cover_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ) : (
+                        <div className="artwork-placeholder"><i className="fa-solid fa-music" /></div>
+                      )}
                       {(room.listener_count || 0) > 5 && <div className="live-badge">LIVE</div>}
                       <div className="room-listeners-badge"><i className="fa-solid fa-headphones" /><span>{room.listener_count || 0}</span></div>
                     </div>
                     <div className="room-info">
                       <div className="room-title">{room.name}</div>
                       <div className="room-meta">
-                        <span className="room-genre">{room.description || 'Без описания'}</span>
-                        <span className="room-privacy"><i className={`fa-solid ${room.is_public ? 'fa-globe' : 'fa-lock'}`} style={{ fontSize: '0.65rem' }} /></span>
+                        <span className="room-genre">{room.genre || room.description || 'Без описания'}</span>
+                        <span className="room-privacy"><i className={`fa-solid ${(room.room_type || 'public') === 'public' ? 'fa-globe' : 'fa-lock'}`} style={{ fontSize: '0.65rem' }} /></span>
                       </div>
                     </div>
                   </div>
@@ -433,14 +494,18 @@ export default function HomePage() {
                     {genreRooms.map((room) => (
                       <div className="room-card glass glass-secondary" key={room.id} onClick={() => (window.location.href = `/user?room_id=${room.id}`)}>
                         <div className="room-artwork">
-                          <div className="artwork-placeholder"><i className="fa-solid fa-music" /></div>
+                          {room.cover_url ? (
+                            <img src={room.cover_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          ) : (
+                            <div className="artwork-placeholder"><i className="fa-solid fa-music" /></div>
+                          )}
                           <div className="room-listeners-badge"><i className="fa-solid fa-headphones" /> {room.listener_count || 0}</div>
                         </div>
                         <div className="room-info">
                           <div className="room-title">{room.name}</div>
                           <div className="room-meta">
-                            <span className="room-genre">{room.description || '—'}</span>
-                            <span className="room-privacy"><i className={`fa-solid ${room.is_public ? 'fa-globe' : 'fa-lock'}`} style={{ fontSize: '.6rem' }} /></span>
+                            <span className="room-genre">{room.genre || room.description || '—'}</span>
+                            <span className="room-privacy"><i className={`fa-solid ${(room.room_type || 'public') === 'public' ? 'fa-globe' : 'fa-lock'}`} style={{ fontSize: '.6rem' }} /></span>
                           </div>
                         </div>
                       </div>
@@ -455,26 +520,165 @@ export default function HomePage() {
 
       {showCreateModal && (
         <div className="modal-overlay open" onClick={(e) => e.target.classList.contains('modal-overlay') && setShowCreateModal(false)}>
-          <div className="modal glass glass-primary">
+          <div className="modal glass glass-primary" style={{ maxWidth: 520 }}>
             <div className="modal-header">
               <h3>Создать комнату</h3>
               <button className="modal-close" onClick={() => setShowCreateModal(false)}><i className="fa-solid fa-xmark" /></button>
             </div>
             <form className="modal-form" onSubmit={createRoom}>
+              {/* ── Cover ─────────────────────────────────────────────── */}
+              <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Обложка комнаты</label>
+                <label
+                  className="glass-tertiary"
+                  style={{
+                    cursor: 'pointer',
+                    display: 'block',
+                    width: '100%',
+                    aspectRatio: '16/9',
+                    borderRadius: 14,
+                    overflow: 'hidden',
+                    position: 'relative',
+                    background: 'rgba(255,255,255,0.04)',
+                  }}
+                >
+                  {createForm.cover_url ? (
+                    <img src={createForm.cover_url} alt="cover" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', gap: 6, opacity: 0.7 }}>
+                      <i className="fa-solid fa-image" style={{ fontSize: '1.6rem' }} />
+                      <span style={{ fontSize: '0.85rem' }}>Загрузить обложку (jpg/png/webp)</span>
+                    </div>
+                  )}
+                  {coverUploading && (
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.45)' }}>
+                      <div className="spinner" />
+                    </div>
+                  )}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) uploadCoverDraft(file);
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+                {createForm.cover_url && (
+                  <button
+                    type="button"
+                    className="btn glass-tertiary"
+                    style={{ alignSelf: 'flex-start', fontSize: '0.78rem', padding: '6px 10px' }}
+                    onClick={() => setCreateForm((p) => ({ ...p, cover_url: '' }))}
+                  >
+                    <i className="fa-solid fa-rotate-left" /> Убрать обложку
+                  </button>
+                )}
+              </div>
+
+              {/* ── Name ───────────────────────────────────────────────── */}
               <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Название *</label>
                 <input className="input" type="text" value={createForm.name} onChange={(e) => setCreateForm((prev) => ({ ...prev, name: e.target.value }))} required maxLength={80} />
               </div>
+
+              {/* ── Description ────────────────────────────────────────── */}
               <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Описание</label>
-                <input className="input" type="text" value={createForm.description} onChange={(e) => setCreateForm((prev) => ({ ...prev, description: e.target.value }))} maxLength={200} />
+                <textarea
+                  className="input"
+                  rows={2}
+                  value={createForm.description}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, description: e.target.value }))}
+                  maxLength={200}
+                  style={{ resize: 'vertical', minHeight: 60 }}
+                />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 0' }}>
-                <input type="checkbox" checked={createForm.is_public} onChange={(e) => setCreateForm((prev) => ({ ...prev, is_public: e.target.checked }))} style={{ width: 16, height: 16, accentColor: 'var(--accent)' }} />
-                <label style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>Публичная комната</label>
+
+              {/* ── Genre + max_users ──────────────────────────────────── */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Жанр</label>
+                  <input
+                    className="input"
+                    list="room-genre-suggestions"
+                    type="text"
+                    value={createForm.genre}
+                    onChange={(e) => setCreateForm((prev) => ({ ...prev, genre: e.target.value }))}
+                    maxLength={40}
+                    placeholder="Lofi, Hip-Hop, Jazz…"
+                  />
+                  <datalist id="room-genre-suggestions">
+                    {GENRES.map((g) => (
+                      <option key={g.name} value={g.name} />
+                    ))}
+                  </datalist>
+                </div>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Макс. слушателей</label>
+                  <input
+                    className="input"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={createForm.max_users}
+                    onChange={(e) => setCreateForm((prev) => ({ ...prev, max_users: e.target.value }))}
+                  />
+                </div>
               </div>
-              <button type="submit" className="btn btn-accent w-full" style={{ padding: 13, fontSize: '0.95rem', fontWeight: 600 }}>
-                Создать комнату
+
+              {/* ── room_type ──────────────────────────────────────────── */}
+              <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>Тип комнаты</label>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {[
+                    { v: 'public', label: 'Публичная', icon: 'globe' },
+                    { v: 'private', label: 'Приватная', icon: 'lock' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.v}
+                      type="button"
+                      className={`btn glass-tertiary ${createForm.room_type === opt.v ? 'active' : ''}`}
+                      style={{
+                        flex: 1,
+                        padding: '10px 12px',
+                        fontSize: '0.85rem',
+                        outline: createForm.room_type === opt.v ? '2px solid var(--accent, #6c63ff)' : 'none',
+                      }}
+                      onClick={() => setCreateForm((p) => ({ ...p, room_type: opt.v }))}
+                    >
+                      <i className={`fa-solid fa-${opt.icon}`} /> {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* ── Password (только для приватных комнат) ──────────────── */}
+              {createForm.room_type === 'private' && (
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 500, color: 'var(--text-secondary)' }}>
+                    Пароль <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(для приватной комнаты)</span>
+                  </label>
+                  <input
+                    className="input"
+                    type="password"
+                    value={createForm.password}
+                    onChange={(e) => setCreateForm((prev) => ({ ...prev, password: e.target.value }))}
+                    placeholder="Введите пароль..."
+                    maxLength={50}
+                  />
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="btn btn-accent w-full"
+                disabled={createSubmitting || !createForm.name.trim()}
+                style={{ padding: 13, fontSize: '0.95rem', fontWeight: 600, opacity: createSubmitting ? 0.7 : 1 }}
+              >
+                {createSubmitting ? 'Создание…' : 'Создать комнату'}
               </button>
             </form>
           </div>

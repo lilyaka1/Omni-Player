@@ -29,15 +29,50 @@ class Settings(BaseSettings):
     # Voice inserts
     TTS_ENABLED: bool = True
     TTS_MODEL_PATH: Optional[str] = None
-    
+    TTS_MODEL_DIR: Optional[str] = None
+    TTS_AUDIO_DIR: Optional[str] = None
+    TTS_MAX_CONCURRENT: int = 2
+    PIPER_BIN: Optional[str] = None
+    RVC_MODEL_PATH: Optional[str] = None
+    RVC_MODEL_DIR: Optional[str] = None
+    RVC_ENABLED: bool = True
+    RVC_CONFIG_PATH: Optional[str] = None
+    RVC_SPEAKER: int = 0
+    RVC_CACHE_DIR: Optional[str] = None
+    RVC_DEFAULT_PITCH: int = 0
+    RVC_INDEX_RATE: float = 0.75
+    RVC_PROTECT: float = 0.33
+    MAX_CONCURRENT_RVC: int = 2
+
+    # HLS
+    HLS_ENABLED: bool = True
+    HLS_SEGMENT_DURATION: int = 6
+    HLS_USE_S3: bool = False
+
+    # CORS
+    ALLOWED_ORIGINS: Optional[str] = None
+
     # Room settings
     MAX_ROOM_USERS: int = 100
     MAX_QUEUE_SIZE: int = 50
-    
+
+    # Storage
+    DOWNLOADS_DIR: str = "./downloads"
+    UPLOADS_DIR: str = "./backend/static/uploads"
+    AVATARS_SUBDIR: str = "avatars"
+    COVERS_SUBDIR: str = "covers"
+    ROOM_COVERS_SUBDIR: str = "room-covers"
+
     model_config = ConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        case_sensitive=True
+        case_sensitive=True,
+        extra="ignore",
     )
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    """Совместимость со старым кодом (ожидающим callable)."""
+    return settings

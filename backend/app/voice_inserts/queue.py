@@ -353,6 +353,66 @@ async def cancel_insert(insert_id: int, user_id: int) -> bool:
         db.close()
 
 
+async def pop_ready_inserts(room_id: int, current_track_id: Optional[int] = None) -> list:
+    """
+    Возвращает список ready-инсертов, которые надо проиграть СЕЙЧАС в стриме комнаты,
+    и помечает их как 'playing'. Вызывается из broadcast loop между треками.
+
+    Логика отбора:
+      - status == 'ready'
+      - is_auto == False (авто-фразы только в кэше, не играют сами)
+      - либо play_after_track_id == current_track_id, либо без привязки к треку
+    """
+    from sqlalchemy import or_
+
+    db = SessionLocal()
+    try:
+        q = select(VoiceInsert).where(
+            VoiceInsert.room_id == room_id,
+            VoiceInsert.status == "ready",
+            VoiceInsert.is_auto == False,  # noqa: E712
+        )
+        if current_track_id is not None:
+            q = q.where(
+                or_(
+                    VoiceInsert.play_after_track_id == current_track_id,
+                    VoiceInsert.play_after_track_id.is_(None),
+                )
+            )
+        else:
+            q = q.where(VoiceInsert.play_after_track_id.is_(None))
+
+        inserts = db.execute(q.order_by(VoiceInsert.scheduled_at)).scalars().all()
+        if not inserts:
+            return []
+
+        snapshots = []
+        for ins in inserts:
+            ins.status = "playing"
+            snapshots.append({
+                "id": ins.id,
+                "text": ins.text,
+                "audio_path": ins.audio_path,
+                "duration_sec": ins.duration_sec,
+            })
+        db.commit()
+        return snapshots
+    finally:
+        db.close()
+
+
+async def mark_insert_played(insert_id: int) -> None:
+    """Помечает insert как 'played' после успешной трансляции в стриме."""
+    db = SessionLocal()
+    try:
+        ins = db.get(VoiceInsert, insert_id)
+        if ins and ins.status == "playing":
+            ins.status = "played"
+            db.commit()
+    finally:
+        db.close()
+
+
 async def clear_room_inserts(room_id: int) -> int:
     """Очищает активные voice inserts в комнате (кроме auto)."""
     db = SessionLocal()

@@ -1,13 +1,44 @@
 """
 RoomManager — оркестратор broadcast-потоков для всех комнат.
-"""
-import asyncio
-import time as _t
-from typing import Dict
 
-from app.room.room_state import RoomState
+Архитектура (упрощённая):
+   1. При добавлении трека в комнату фоновая таска `prefetch_track_file`
+      скачивает аудио в backend/downloads/{source}_{src_id}.mp3 и пишет
+      ЛОКАЛЬНЫЙ путь в RoomTrack.stream_url.
+   2. broadcast_loop читает RoomTrack.now_playing → берёт локальный файл →
+      запускает ffmpeg → льёт чанки слушателям.
+   3. После трека: проверяет ready voice inserts → проигрывает их по очереди
+      (через тот же ffmpeg+RoomState) → advance_track → следующий трек.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import time as _t
+from pathlib import Path
+from typing import Dict, Optional
+
 from app.room.ffmpeg import stream_ffmpeg
 from app.room.queue import advance_track, peek_next_track
+from app.room.room_state import RoomState
+
+# Куда складываем локальные mp3
+_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+_DOWNLOADS_DIR = _BACKEND_DIR / "downloads"
+_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _file_stem(source: str, source_track_id: str) -> str:
+    safe = "".join(c for c in (source_track_id or "") if c.isalnum() or c in "_-")
+    return f"{source or 'src'}_{safe or 'unknown'}"
+
+
+def _is_local_file(path: Optional[str]) -> bool:
+    if not path:
+        return False
+    if path.startswith(("http://", "https://")):
+        return False
+    return os.path.isfile(path)
 
 
 class RoomManager:
@@ -15,13 +46,13 @@ class RoomManager:
 
     def __init__(self):
         self.broadcasts: Dict[int, RoomState] = {}
-        self._url_fresh_until: Dict[int, float] = {}
-        # Трекинг последней активности комнаты для автоочистки
         self._last_activity: Dict[int, float] = {}
+        # ID треков, для которых сейчас идёт скачивание (антидубликат).
+        self._downloading: set[int] = set()
 
-    # ------------------------------------------------------------------ #
-    #  Публичный API                                                       #
-    # ------------------------------------------------------------------ #
+    # ──────────────────────────────────────────────────────────────────── #
+    #  Public API                                                          #
+    # ──────────────────────────────────────────────────────────────────── #
 
     def get_or_create(self, room_id: int) -> RoomState:
         if room_id not in self.broadcasts:
@@ -33,48 +64,34 @@ class RoomManager:
         return bc is not None and bc.running
 
     async def start_room(self, room_id: int, db_session_factory, soundcloud_client):
-        """Запустить broadcast для комнаты."""
-        bc: RoomState = self.get_or_create(room_id)
+        bc = self.get_or_create(room_id)
         if bc.running:
             print(f"📻 Room {room_id} broadcast already running")
             return
 
-        # Прогреваем TTS-кэш стандартных фраз при запуске комнаты.
+        # Прогреваем TTS-кэш и фоном докачиваем файлы для всех треков комнаты.
         try:
             from app.voice_inserts.queue import prewarm_room
             asyncio.create_task(prewarm_room(room_id))
         except Exception as e:
             print(f"⚠️ Room {room_id}: voice prewarm not started: {e}")
 
+        asyncio.create_task(
+            self.prefetch_room_files(room_id, db_session_factory, soundcloud_client)
+        )
+
         bc.running = True
         bc.task = asyncio.create_task(
             self._broadcast_loop(bc, room_id, db_session_factory, soundcloud_client)
         )
-        # Немедленно обновляем все URL и запускаем периодический refresh
-        asyncio.create_task(
-            self.refresh_room_urls(room_id, db_session_factory, soundcloud_client)
-        )
-        bc._url_refresh_task = asyncio.create_task(
-            self._url_refresh_loop(room_id, db_session_factory, soundcloud_client)
-        )
-        # Трекаем активность
         self._last_activity[room_id] = _t.monotonic()
         print(f"🎙️ Room {room_id}: broadcast STARTED")
 
     async def stop_room(self, room_id: int):
-        """Остановить broadcast комнаты."""
         bc = self.broadcasts.get(room_id)
         if not bc:
             return
         bc.running = False
-        # Отменяем периодический refresh
-        url_task = getattr(bc, '_url_refresh_task', None)
-        if url_task:
-            url_task.cancel()
-            try:
-                await url_task
-            except (asyncio.CancelledError, Exception):
-                pass
         if bc.task:
             bc.task.cancel()
             try:
@@ -82,261 +99,202 @@ class RoomManager:
             except (asyncio.CancelledError, Exception):
                 pass
         await bc.broadcast_end()
-        
-        # Убираем из памяти чтобы не расти бесконечно
-        if room_id in self.broadcasts:
-            del self.broadcasts[room_id]
-        if room_id in self._last_activity:
-            del self._last_activity[room_id]
-        
+
+        self.broadcasts.pop(room_id, None)
+        self._last_activity.pop(room_id, None)
         print(f"⏹️ Room {room_id}: broadcast STOPPED and cleaned up")
 
-    async def prefetch_track_url(self, track_id: int, source_track_id: str,
-                                  db_session_factory, soundcloud_client):
+    # ──────────────────────────────────────────────────────────────────── #
+    #  Prefetch                                                            #
+    # ──────────────────────────────────────────────────────────────────── #
+
+    async def prefetch_track_file(
+        self,
+        track_id: int,
+        source: str,
+        source_track_id: str,
+        db_session_factory,
+        soundcloud_client,
+    ) -> Optional[str]:
         """
-        Фоновая предзагрузка stream URL при добавлении трека в очередь.
-        Когда admin нажмёт Play — URL уже закеширован.
+        Скачивает трек в локальный файл (если ещё не скачан) и пишет путь в
+        RoomTrack.stream_url. Возвращает абсолютный путь к файлу или None.
         """
-        _pf_t0 = _t.perf_counter()
-        print(f"🔥 [prefetch] START track {track_id}")
-        try:
-            info = await soundcloud_client.get_track_info(source_track_id)
-            url = info.get("url") if isinstance(info, dict) else info
-            elapsed = (_t.perf_counter() - _pf_t0) * 1000
-            print(f"🔥 [prefetch] +{elapsed:.0f}ms yt-dlp done, url={'OK' if url else 'NONE'}")
+        if not source_track_id:
+            return None
+        if track_id in self._downloading:
+            return None
 
-            if not url:
-                return
-
-            new_thumb = info.get('thumbnail') if isinstance(info, dict) else None
-
-            def _save_prefetch():
-                from app.database.models import RoomTrack
-                db = db_session_factory()
-                try:
-                    track = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
-                    if not track:
-                        return None
-                    track.stream_url = url
-                    saved_thumb = None
-                    if new_thumb and not track.thumbnail:
-                        track.thumbnail = new_thumb
-                        saved_thumb = new_thumb
-                    title = track.title
-                    room_id = track.room_id
-                    db.commit()
-                    return {"title": title, "room_id": room_id, "thumb": saved_thumb}
-                finally:
-                    db.close()
-
-            result = await asyncio.to_thread(_save_prefetch)
-            if not result:
-                return
-
-            elapsed = (_t.perf_counter() - _pf_t0) * 1000
-            print(f"✅ [prefetch] +{elapsed:.0f}ms CACHED '{result['title']}'")
-
-            if result["thumb"]:
-                print(f"🖼️ [prefetch] thumbnail saved for track {track_id}")
-                await self._broadcast_thumbnail(result["room_id"], track_id, result["thumb"])
-
-            import time
-            self._url_fresh_until[track_id] = time.monotonic() + 3600 * 6  # 6 часов (увеличено для лучшего кэширования)
-
-        except Exception as e:
-            elapsed = (_t.perf_counter() - _pf_t0) * 1000
-            print(f"⚠️ [prefetch] +{elapsed:.0f}ms FAILED track {track_id}: {e}")
-
-    async def refresh_room_urls(self, room_id: int, db_session_factory, soundcloud_client):
-        """
-        Обновить stream_url для ВСЕХ треков комнаты.
-        Вызывается при старте стрима и периодически каждые URL_REFRESH_INTERVAL часов.
-        yt-dlp вызывается последовательно с паузой 1с — чтобы не получить ban от SoundCloud.
-        """
         from app.database.models import RoomTrack
 
-        def _get_tracks():
-            db = db_session_factory()
-            try:
-                return [
-                    (t.id, t.source_track_id, t.source)
-                    for t in db.query(RoomTrack)
-                    .filter(RoomTrack.room_id == room_id)
-                    .order_by(RoomTrack.order)
-                    .all()
-                ]
-            finally:
-                db.close()
-
-        tracks = await asyncio.to_thread(_get_tracks)
-        if not tracks:
-            return
-
-        print(f"🔄 [url_refresh] room {room_id}: refreshing {len(tracks)} tracks...")
-
-        for track_id, source_track_id, source in tracks:
-            if source not in ('soundcloud', 'youtube') or not source_track_id:
-                continue
-
-            # Пропускаем трек если URL свежий (не истёк по нашему кешу)
-            if _t.monotonic() < self._url_fresh_until.get(track_id, 0):
-                print(f"⏩ [url_refresh] track {track_id} still fresh, skipping")
-                continue
-
-            try:
-                info = await soundcloud_client.get_track_info(source_track_id)
-                url = info.get('url') if isinstance(info, dict) else info
-                if not url:
-                    print(f"⚠️ [url_refresh] no URL for track {track_id}")
-                    continue
-
-                def _save(tid=track_id, u=url):
-                    db = db_session_factory()
-                    try:
-                        t = db.query(RoomTrack).filter(RoomTrack.id == tid).first()
-                        if t:
-                            t.stream_url = u
-                            db.commit()
-                    finally:
-                        db.close()
-
-                await asyncio.to_thread(_save)
-                self._url_fresh_until[track_id] = _t.monotonic() + 3600 * 6  # 6 часов (увеличено для лучшего кэширования)
-                print(f"✅ [url_refresh] track {track_id} refreshed")
-
-            except Exception as e:
-                print(f"⚠️ [url_refresh] track {track_id} failed: {e}")
-
-            # Пауза между треками — не ддосим SoundCloud
-            await asyncio.sleep(1.5)
-
-        print(f"✅ [url_refresh] room {room_id}: done")
-
-    async def _url_refresh_loop(self, room_id: int, db_session_factory, soundcloud_client):
-        """
-        Фоновая задача: повторно обновляет все URL комнаты каждые 4 часа.
-        SoundCloud CDN (CloudFront) URL живут ~6 часов — обновляем с запасом.
-        """
-        URL_REFRESH_INTERVAL = 4 * 3600  # 4 часа в секундах
-
-        while True:
-            try:
-                await asyncio.sleep(URL_REFRESH_INTERVAL)
-                bc = self.broadcasts.get(room_id)
-                if not bc or not bc.running:
-                    print(f"⏹️ [url_refresh] room {room_id} stopped, exiting loop")
-                    break
-                print(f"🕒 [url_refresh] scheduled refresh for room {room_id}")
-                await self.refresh_room_urls(room_id, db_session_factory, soundcloud_client)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"⚠️ [url_refresh] loop error room {room_id}: {e}")
-                await asyncio.sleep(60)  # через минуту попробуем снова
-
-    # ------------------------------------------------------------------ #
-    #  Helpers                                                             #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _is_url_expired(url: str) -> bool:
-        """Проверяет, не истёк ли CloudFront signed URL (SoundCloud CDN)."""
-        if not url or 'sndcdn.com' not in url:
-            return False
-        try:
-            import urllib.parse, base64 as _b64, json as _json, time as _time
-            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-            policy_b64 = qs.get('Policy', [None])[0]
-            if not policy_b64:
-                return False
-            # CloudFront использует URL-safe base64: - → +, _ → /
-            policy_b64 = policy_b64.replace('-', '+').replace('_', '/')
-            policy_b64 += '=' * (-len(policy_b64) % 4)
-            policy = _json.loads(_b64.b64decode(policy_b64))
-            expiry = policy['Statement'][0]['Condition']['DateLessThan']['AWS:EpochTime']
-            # Считаем истёкшим если осталось менее 60 сек
-            return _time.time() > expiry - 60
-        except Exception:
-            return False
-
-    # ------------------------------------------------------------------ #
-    #  Broadcast loop                                                      #
-    # ------------------------------------------------------------------ #
-
-    async def _broadcast_loop(self, bc: RoomState, room_id: int,
-                               db_session_factory, soundcloud_client):
-        """Главный цикл: берёт треки, тянет аудио, льёт слушателям."""
-        from app.database.models import Room, RoomTrack
-
-        # ── Синхронные DB-хелперы (выполняются в потоке, не блокируют event loop) ──
-
-        def _fetch_playback_state():
-            """Читает состояние воспроизведения из БД. Запускается в потоке."""
-            db = db_session_factory()
-            try:
-                room = db.query(Room).filter(Room.id == room_id).first()
-                if not room or not room.is_playing:
-                    return None
-                track_id = room.now_playing_track_id
-                if not track_id:
-                    return None
-                track = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
-                if not track:
-                    return None
-                return {
-                    "track_id": track.id,
-                    "title": track.title,
-                    "artist": track.artist,
-                    "stream_url": track.stream_url,
-                    "source_track_id": track.source_track_id,
-                    "thumbnail": track.thumbnail,
-                }
-            finally:
-                db.close()
-
-        def _save_stream_url(track_id, stream_url, new_thumbnail=None):
-            """Сохраняет stream_url в БД. Запускается в потоке."""
+        # Проверяем БД — может, файл уже на диске.
+        def _read_existing():
             db = db_session_factory()
             try:
                 t = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
                 if not t:
                     return None
-                t.stream_url = stream_url
-                saved_thumb = None
-                if new_thumbnail and not t.thumbnail:
-                    t.thumbnail = new_thumbnail
-                    saved_thumb = new_thumbnail
-                db.commit()
-                return saved_thumb  # None если thumbnail не обновлён
+                return {
+                    "stream_url": t.stream_url,
+                    "thumbnail": t.thumbnail,
+                }
             finally:
                 db.close()
 
-        def _clear_stream_url(track_id):
-            """Сбрасывает stream_url (URL протух). Запускается в потоке."""
-            db = db_session_factory()
+        existing = await asyncio.to_thread(_read_existing)
+        if not existing:
+            return None
+        if _is_local_file(existing["stream_url"]):
+            return existing["stream_url"]
+
+        # Достаём page URL — для SC это `source_track_id` (либо чистый ID,
+        # либо webpage URL — `download_to_file` приведёт к нужному виду).
+        track_url = source_track_id
+
+        self._downloading.add(track_id)
+        try:
+            stem = _file_stem(source, source_track_id)
+            target_dir = _DOWNLOADS_DIR
+            print(f"⬇️ [prefetch] track {track_id}: downloading → {stem}.mp3")
+            t0 = _t.perf_counter()
+            info = await soundcloud_client.download_to_file(
+                track_url, target_dir, stem
+            )
+            elapsed = (_t.perf_counter() - t0) * 1000
+            if not info or not info.get("path"):
+                print(f"❌ [prefetch] track {track_id}: download failed (+{elapsed:.0f}ms)")
+                return None
+
+            local_path = info["path"]
+            new_thumb = info.get("thumbnail")
+
+            # ── Валидация скачанного файла ──
             try:
-                t = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
-                if t:
-                    t.stream_url = None
+                from app.room.ffmpeg import validate_audio_file
+                v = validate_audio_file(local_path, timeout=15)
+                if not v.get("ok"):
+                    print(f"❌ [prefetch] track={track_id}: audio broken after download — {v.get('error')}")
+                    # Не сохраняем битый путь
+                    return None
+                print(f"✅ [prefetch] track={track_id}: audio valid ({v.get('duration', '?')}s {v.get('codec')})")
+            except Exception as ve:
+                print(f"⚠️ [prefetch] track={track_id}: validation error: {ve}")
+
+            def _save():
+                db = db_session_factory()
+                try:
+                    t = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
+                    if not t:
+                        return None
+                    t.stream_url = local_path
+                    saved_thumb = None
+                    if new_thumb and not t.thumbnail:
+                        t.thumbnail = new_thumb
+                        saved_thumb = new_thumb
+                    room_id = t.room_id
                     db.commit()
+                    return {"room_id": room_id, "thumb": saved_thumb}
+                finally:
+                    db.close()
+
+            saved = await asyncio.to_thread(_save)
+            print(f"✅ [prefetch] track {track_id} cached locally (+{elapsed:.0f}ms)")
+            if saved and saved["thumb"]:
+                await self._broadcast_thumbnail(saved["room_id"], track_id, saved["thumb"])
+            return local_path
+        except Exception as e:
+            print(f"❌ [prefetch] track {track_id} error: {e}")
+            return None
+        finally:
+            self._downloading.discard(track_id)
+
+    async def prefetch_room_files(
+        self, room_id: int, db_session_factory, soundcloud_client
+    ):
+        """Скачивает локальные mp3 для ВСЕХ треков комнаты последовательно."""
+        from app.database.models import RoomTrack
+
+        def _list_tracks():
+            db = db_session_factory()
+            try:
+                rows = (
+                    db.query(RoomTrack)
+                    .filter(RoomTrack.room_id == room_id)
+                    .order_by(RoomTrack.order)
+                    .all()
+                )
+                return [
+                    (t.id, t.source, t.source_track_id, t.stream_url) for t in rows
+                ]
             finally:
                 db.close()
 
-        def _count_remaining_tracks(current_track_id: int) -> int:
-            """Сколько треков осталось до конца очереди от текущего (включая текущий)."""
+        tracks = await asyncio.to_thread(_list_tracks)
+        if not tracks:
+            return
+
+        print(f"📥 [prefetch] room {room_id}: ensuring {len(tracks)} local files…")
+        for track_id, source, source_track_id, stream_url in tracks:
+            if _is_local_file(stream_url):
+                continue
+            if not source_track_id:
+                continue
+            await self.prefetch_track_file(
+                track_id, source, source_track_id, db_session_factory, soundcloud_client
+            )
+            await asyncio.sleep(0.5)
+        print(f"✅ [prefetch] room {room_id}: done")
+
+    # ──────────────────────────────────────────────────────────────────── #
+    #  Broadcast loop                                                      #
+    # ──────────────────────────────────────────────────────────────────── #
+
+    async def _broadcast_loop(
+        self,
+        bc: RoomState,
+        room_id: int,
+        db_session_factory,
+        soundcloud_client,
+    ):
+        from app.database.models import Room, RoomTrack
+
+        def _fetch_playback_state():
             db = db_session_factory()
             try:
-                current = db.query(RoomTrack).filter(RoomTrack.id == current_track_id).first()
-                if not current:
-                    return 0
+                room = db.query(Room).filter(Room.id == room_id).first()
+                if not room or not room.is_playing or not room.now_playing_track_id:
+                    return None
+                t = (
+                    db.query(RoomTrack)
+                    .filter(RoomTrack.id == room.now_playing_track_id)
+                    .first()
+                )
+                if not t:
+                    return None
+                return {
+                    "track_id": t.id,
+                    "title": t.title,
+                    "artist": t.artist,
+                    "stream_url": t.stream_url,
+                    "source": t.source,
+                    "source_track_id": t.source_track_id,
+                    "thumbnail": t.thumbnail,
+                }
+            finally:
+                db.close()
 
-                if current.order is not None:
+        def _count_remaining(current_track_id: int) -> int:
+            db = db_session_factory()
+            try:
+                cur = db.query(RoomTrack).filter(RoomTrack.id == current_track_id).first()
+                if not cur:
+                    return 0
+                if cur.order is not None:
                     return (
                         db.query(RoomTrack)
-                        .filter(RoomTrack.room_id == room_id, RoomTrack.order >= current.order)
+                        .filter(RoomTrack.room_id == room_id, RoomTrack.order >= cur.order)
                         .count()
                     )
-
                 return (
                     db.query(RoomTrack)
                     .filter(RoomTrack.room_id == room_id, RoomTrack.id >= current_track_id)
@@ -345,25 +303,19 @@ class RoomManager:
             finally:
                 db.close()
 
-        # ────────────────────────────────────────────────────────────────────────
-
         print(f"🔄 Room {room_id}: broadcast loop started")
         last_track_id = None
 
         while bc.running:
             try:
-                # Читаем состояние комнаты В ПОТОКЕ (не блокируем event loop)
                 state = await asyncio.to_thread(_fetch_playback_state)
-
                 if state is None:
                     await asyncio.sleep(2)
                     continue
 
                 track_id = state["track_id"]
-
-                # Ждём смены трека (не стримим одно и то же)
                 if track_id == last_track_id:
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
                     continue
 
                 last_track_id = track_id
@@ -371,92 +323,79 @@ class RoomManager:
                 bc.current_track_title = f"{state['artist']} - {state['title']}"
                 bc.skip_event.clear()
 
-                # Если в очереди осталось <=5 треков, догреваем TTS-кэш заранее.
+                # voice prewarm если очередь к концу
                 try:
-                    remaining = await asyncio.to_thread(_count_remaining_tracks, track_id)
+                    remaining = await asyncio.to_thread(_count_remaining, track_id)
                     if remaining <= 5:
                         from app.voice_inserts.queue import on_queue_change
                         asyncio.create_task(on_queue_change(room_id, remaining))
                 except Exception as e:
-                    print(f"⚠️ [voice] queue warmup check failed room {room_id}: {e}")
+                    print(f"⚠️ [voice] queue warmup check failed: {e}")
 
-                _loop_t0 = _t.perf_counter()
-                print(f"\n⏱  [room] room {room_id}: START '{bc.current_track_title}'")
+                # Гарантируем, что у нас локальный файл
+                local_path = state["stream_url"]
+                if not _is_local_file(local_path):
+                    print(f"⏬ [room] track {track_id}: no local file, downloading on-the-fly")
+                    local_path = await self.prefetch_track_file(
+                        track_id,
+                        state["source"],
+                        state["source_track_id"],
+                        db_session_factory,
+                        soundcloud_client,
+                    )
 
-                # Получаем stream URL
-                stream_url = state["stream_url"] or None
-
-                # Проверяем не истёк ли CloudFront URL до запуска ffmpeg
-                url_expired = self._is_url_expired(stream_url)
-                needs_refresh = not stream_url or url_expired
-
-                if url_expired:
-                    elapsed = (_t.perf_counter() - _loop_t0) * 1000
-                    print(f"⏱  [room] +{elapsed:.0f}ms ⚠️ CloudFront URL expired, refreshing...")
-
-                if not needs_refresh:
-                    fresh_until = self._url_fresh_until.get(track_id, 0)
-                    elapsed = (_t.perf_counter() - _loop_t0) * 1000
-                    if _t.monotonic() < fresh_until:
-                        print(f"⏱  [room] +{elapsed:.0f}ms ⚡ URL fresh, skipping HEAD")
-                    else:
-                        print(f"⏱  [room] +{elapsed:.0f}ms ⚡ streaming directly")
-
-                if needs_refresh and state["source_track_id"]:
-                    elapsed = (_t.perf_counter() - _loop_t0) * 1000
-                    print(f"⏱  [room] +{elapsed:.0f}ms calling yt-dlp...")
-                    info = await soundcloud_client.get_track_info(state["source_track_id"])
-                    elapsed = (_t.perf_counter() - _loop_t0) * 1000
-                    print(f"⏱  [room] +{elapsed:.0f}ms yt-dlp done")
-
-                    stream_url = info.get("url") if isinstance(info, dict) else info
-
-                    if stream_url:
-                        new_thumb = info.get("thumbnail") if isinstance(info, dict) else None
-                        # Сохраняем URL в потоке
-                        saved_thumb = await asyncio.to_thread(
-                            _save_stream_url, track_id, stream_url, new_thumb
-                        )
-                        if saved_thumb:
-                            print(f"🖼️ [room] thumbnail saved for track {track_id}")
-                            await self._broadcast_thumbnail(room_id, track_id, saved_thumb)
-
-                if not stream_url:
-                    print(f"❌ Room {room_id}: no stream URL for track {track_id}, skipping")
-                    await asyncio.sleep(3)
-                    continue
-
-                # Стримим трек
-                elapsed = (_t.perf_counter() - _loop_t0) * 1000
-                print(f"⏱  [room] +{elapsed:.0f}ms starting ffmpeg...")
-                
-                # Запускаем prefetch следующего трека в фоне (чтобы не было задержки)
-                asyncio.create_task(self._aggressive_prefetch(room_id, track_id, db_session_factory, soundcloud_client))
-                
-                result = await stream_ffmpeg(bc, stream_url)
-
-                if result == "expired":
-                    print(f"🔄 [room] URL expired, refreshing...")
-                    await asyncio.to_thread(_clear_stream_url, track_id)
+                if not local_path:
+                    print(f"❌ Room {room_id}: cannot get file for track {track_id}, skipping")
+                    advanced = await advance_track(room_id, db_session_factory)
+                    if not advanced:
+                        bc.running = False
+                        break
                     last_track_id = -1
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(1)
                     continue
+
+                # Параллельно качаем следующий трек
+                asyncio.create_task(
+                    self._prefetch_next(room_id, db_session_factory, soundcloud_client)
+                )
+
+                t0 = _t.perf_counter()
+                print(f"\n⏱  [room] room {room_id}: PLAY '{bc.current_track_title}'")
+                result = await stream_ffmpeg(bc, local_path)
+                elapsed = (_t.perf_counter() - t0) * 1000
+                print(f"⏱  [room] room {room_id}: track ended ({result}, +{elapsed:.0f}ms)")
 
                 if result == "skipped":
-                    print(f"⏭️ [room] track skipped by admin")
-                    await asyncio.sleep(0.3)
+                    await asyncio.sleep(0.2)
                     continue
 
-                if not result:
-                    break
+                if not result or result == "expired":
+                    # Файл битый/исчез — обнулим путь, попробуем перекачать в следующей итерации
+                    def _clear_url():
+                        db = db_session_factory()
+                        try:
+                            t = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
+                            if t:
+                                t.stream_url = None
+                                db.commit()
+                        finally:
+                            db.close()
+                    await asyncio.to_thread(_clear_url)
+                    if not result:  # bc.running == False
+                        break
+                    last_track_id = -1
+                    await asyncio.sleep(1)
+                    continue
 
-                # Трек закончился — переходим к следующему
+                # Трек закончился штатно → проигрываем готовые voice inserts
+                await self._play_voice_inserts(bc, room_id, track_id)
+
                 advanced = await advance_track(room_id, db_session_factory)
                 if not advanced:
                     bc.running = False
                     break
 
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.2)
 
             except asyncio.CancelledError:
                 break
@@ -469,37 +408,75 @@ class RoomManager:
         await bc.broadcast_end()
         print(f"🔇 Room {room_id}: broadcast loop ended")
 
-    # ------------------------------------------------------------------ #
-    #  Helpers                                                             #
-    # ------------------------------------------------------------------ #
+    # ──────────────────────────────────────────────────────────────────── #
+    #  Voice inserts playback                                              #
+    # ──────────────────────────────────────────────────────────────────── #
 
-    async def _prefetch_next_track(self, room_id: int, db_session_factory, soundcloud_client):
-        """Предзагрузка stream URL для следующего трека пока играет текущий."""
+    async def _play_voice_inserts(self, bc: RoomState, room_id: int, just_played_track_id: int):
+        """Между треками — проигрываем все ready inserts по очереди."""
         try:
-            # Обновляем время активности
-            self._last_activity[room_id] = _t.monotonic()
-            
-            await asyncio.sleep(5)  # Ждём 5с после старта текущего трека
-            next_info = await peek_next_track(room_id, db_session_factory)
-            if not next_info:
-                return
-            
-            # Если URL уже есть и не истёк, ничего не делаем
-            if next_info["stream_url"] and not self._is_url_expired(next_info["stream_url"]):
-                print(f"⚡ [prefetch] Next track {next_info['id']} already has fresh URL")
-                return
-            
-            # Запускаем prefetch
-            if next_info["source_track_id"]:
-                print(f"🔥 [prefetch] Fetching URL for next track: {next_info['title']}")
-                await self.prefetch_track_url(
-                    next_info["id"],
-                    next_info["source_track_id"],
-                    db_session_factory,
-                    soundcloud_client
-                )
+            from app.voice_inserts.queue import pop_ready_inserts, mark_insert_played
         except Exception as e:
-            print(f"⚠️ [prefetch] Error prefetching next track: {e}")
+            print(f"⚠️ [voice] cannot import queue helpers: {e}")
+            return
+
+        try:
+            inserts = await pop_ready_inserts(room_id, just_played_track_id)
+        except Exception as e:
+            print(f"⚠️ [voice] pop_ready_inserts failed: {e}")
+            return
+
+        if not inserts:
+            return
+
+        print(f"🗣️  [voice] room {room_id}: playing {len(inserts)} inserts")
+        for ins in inserts:
+            audio_path = getattr(ins, "audio_path", None) or (
+                ins.get("audio_path") if isinstance(ins, dict) else None
+            )
+            insert_id = getattr(ins, "id", None) or (
+                ins.get("id") if isinstance(ins, dict) else None
+            )
+            if not audio_path or not os.path.isfile(audio_path):
+                print(f"⚠️ [voice] insert {insert_id}: file missing ({audio_path})")
+                continue
+
+            try:
+                await self._broadcast_insert_event(room_id, insert_id, "playing")
+                result = await stream_ffmpeg(bc, audio_path)
+                if result is False:
+                    return  # broadcast остановлен
+                if insert_id is not None:
+                    try:
+                        await mark_insert_played(insert_id)
+                    except Exception as e:
+                        print(f"⚠️ [voice] mark_insert_played({insert_id}) failed: {e}")
+                await self._broadcast_insert_event(room_id, insert_id, "played")
+            except Exception as e:
+                print(f"⚠️ [voice] insert {insert_id} playback error: {e}")
+
+    # ──────────────────────────────────────────────────────────────────── #
+    #  Helpers                                                             #
+    # ──────────────────────────────────────────────────────────────────── #
+
+    async def _prefetch_next(self, room_id: int, db_session_factory, soundcloud_client):
+        try:
+            self._last_activity[room_id] = _t.monotonic()
+            await asyncio.sleep(2)
+            nxt = await peek_next_track(room_id, db_session_factory)
+            if not nxt:
+                return
+            if _is_local_file(nxt.get("stream_url")):
+                return
+            await self.prefetch_track_file(
+                nxt["id"],
+                nxt.get("source", "soundcloud"),
+                nxt.get("source_track_id"),
+                db_session_factory,
+                soundcloud_client,
+            )
+        except Exception as e:
+            print(f"⚠️ [prefetch_next] {e}")
 
     async def _broadcast_thumbnail(self, room_id: int, track_id: int, thumbnail: str):
         import json
@@ -513,97 +490,17 @@ class RoomManager:
         except Exception as e:
             print(f"⚠️ thumbnail broadcast failed: {e}")
 
-room_manager = RoomManager()
-
-    async def _aggressive_prefetch(self, room_id: int, current_track_id: int, db_session_factory, soundcloud_client):
-        """
-        Агрессивный prefetch: загружаем следующие 2-3 трека заранее.
-        Вызывается когда начинается воспроизведение текущего трека.
-        """
+    async def _broadcast_insert_event(self, room_id: int, insert_id, status: str):
+        import json
         try:
-            from app.database.models import RoomTrack
-            
-            def _get_next_tracks():
-                db = db_session_factory()
-                try:
-                    current = db.query(RoomTrack).filter(RoomTrack.id == current_track_id).first()
-                    if not current:
-                        return []
-                    
-                    # Получаем следующие 3 трека
-                    if current.order is not None:
-                        next_tracks = (
-                            db.query(RoomTrack)
-                            .filter(
-                                RoomTrack.room_id == room_id,
-                                RoomTrack.order > current.order
-                            )
-                            .order_by(RoomTrack.order)
-                            .limit(3)
-                            .all()
-                        )
-                    else:
-                        next_tracks = (
-                            db.query(RoomTrack)
-                            .filter(
-                                RoomTrack.room_id == room_id,
-                                RoomTrack.id > current_track_id
-                            )
-                            .order_by(RoomTrack.id)
-                            .limit(3)
-                            .all()
-                        )
-                    
-                    return [
-                        {
-                            "id": t.id,
-                            "source_track_id": t.source_track_id,
-                            "title": t.title,
-                            "stream_url": t.stream_url
-                        }
-                        for t in next_tracks
-                        if t.source_track_id
-                    ]
-                finally:
-                    db.close()
-            
-            # Ждём 3 секунды после старта текущего трека
-            await asyncio.sleep(3)
-            
-            next_tracks = await asyncio.to_thread(_get_next_tracks)
-            if not next_tracks:
-                print(f"⚡ [aggressive_prefetch] No tracks to prefetch for room {room_id}")
-                return
-            
-            print(f"🚀 [aggressive_prefetch] Starting prefetch of {len(next_tracks)} tracks for room {room_id}")
-            
-            # Запускаем prefetch параллельно для всех треков
-            tasks = []
-            for track in next_tracks:
-                # Пропускаем если URL уже есть и свежий
-                if track["stream_url"] and not self._is_url_expired(track["stream_url"]):
-                    fresh_until = self._url_fresh_until.get(track["id"], 0)
-                    if _t.monotonic() < fresh_until:
-                        print(f"⏩ [aggressive_prefetch] Track {track['id']} already fresh, skipping")
-                        continue
-                
-                # Добавляем задержку между запросами чтобы не ддосить SoundCloud
-                await asyncio.sleep(0.5)
-                
-                task = asyncio.create_task(
-                    self.prefetch_track_url(
-                        track["id"],
-                        track["source_track_id"],
-                        db_session_factory,
-                        soundcloud_client
-                    )
-                )
-                tasks.append(task)
-            
-            # Ждём завершения всех prefetch задач
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-                print(f"✅ [aggressive_prefetch] Completed prefetch of {len(tasks)} tracks for room {room_id}")
-            
-        except Exception as e:
-            print(f"⚠️ [aggressive_prefetch] Error: {e}")
+            from app.websocket.manager import manager as _mgr
+            await _mgr.broadcast(room_id, json.dumps({
+                "type": "voice_insert_status",
+                "insert_id": insert_id,
+                "status": status,
+            }))
+        except Exception:
+            pass
+
+
+room_manager = RoomManager()

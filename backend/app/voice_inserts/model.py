@@ -1,6 +1,8 @@
 """Voice Insert model + DB schema."""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, Float
+from sqlalchemy import (
+    Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text,
+)
 from app.database.models import Base
 
 
@@ -24,7 +26,11 @@ class VoiceInsert(Base):
 
     # Планирование
     scheduled_at = Column(DateTime, nullable=False)
-    play_after_track_id = Column(Integer, ForeignKey("room_track.id", ondelete="SET NULL"), nullable=True)
+    play_after_track_id = Column(
+        Integer,
+        ForeignKey("room_track.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Время жизни
     created_at = Column(DateTime, default=datetime.utcnow)

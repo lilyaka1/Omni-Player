@@ -38,6 +38,9 @@ var GLOBAL = window.GLOBAL || {
   // WebSocket соединение
   ws: null,
 
+  // Локальное подключение слушателя к room stream
+  listenerAttached: null,
+
   // Reconnect timer
   _wsReconnectTimer: null,
   _wsReconnectDelay: 2000,  // ms, grows on repeated failures

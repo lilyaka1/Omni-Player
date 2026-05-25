@@ -61,7 +61,8 @@
               style="
                 writing-mode: vertical-lr;
                 direction: rtl;
-                -webkit-appearance: slider-vertical;
+                -webkit-appearance: none;
+                appearance: none;
                 width: 24px;
                 height: 90px;
                 accent-color: var(--accent);

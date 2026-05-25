@@ -32,6 +32,19 @@
       return `${m}:${sec.toString().padStart(2,'0')}`;
     }
 
+    function splitTrackTitle(title, artist) {
+      const t = String(title || '').trim();
+      const a = String(artist || '').trim();
+      for (const sep of [' — ', ' – ', ' - ']) {
+        if (!t.includes(sep)) continue;
+        const parts = t.split(sep);
+        const left = parts[0].trim();
+        const right = parts.slice(1).join(sep).trim();
+        if (left && right) return { title: right, artist: left };
+      }
+      return { title: t, artist: a };
+    }
+
     async function authFetch(url, opts={}) {
       const headers = {'Content-Type':'application/json', ...opts.headers};
       if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -202,6 +215,9 @@
       el.innerHTML = tracks.map(t => {
         // SoundCloud использует track_page_url, YouTube — page_url
         const pageUrl = t.page_url || t.track_page_url || '';
+        // Нормализуем Artist – Title из title если нужно
+        const { title: normTitle, artist: normArtist } = splitTrackTitle(t.title, t.artist);
+        const showArtist = normArtist && normArtist !== 'Unknown' && normArtist !== t.title;
         return `
           <div class="search-result-card glass glass-secondary">
             <div class="search-result-thumb">
@@ -211,7 +227,8 @@
               }
             </div>
             <div class="search-result-info">
-              <div class="search-result-title">${escHtml(t.title)}</div>
+              <div class="search-result-title">${escHtml(normTitle)}</div>
+              ${showArtist ? `<div class="search-result-sub">${escHtml(normArtist)}</div>` : ''}
               <div class="search-result-sub">${t.duration ? formatTime(t.duration) : '—'}</div>
               <button class="search-result-add" data-url="${escHtml(pageUrl)}">
                 <i class="fa-solid fa-bookmark"></i> В библиотеку

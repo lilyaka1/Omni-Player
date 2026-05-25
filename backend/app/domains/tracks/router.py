@@ -10,9 +10,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database.session import get_db
-from app.database.models import RoomTrack
+from app.database.models import Room, RoomTrack
 from app.room.providers.soundcloud import soundcloud_client
 from app.domains.tracks import service
+from app.room.queue import get_room_state
 
 router = APIRouter(prefix="/stream", tags=["tracks"])
 
@@ -42,7 +43,17 @@ async def search_soundcloud(
 @router.get("/queue/{room_id}")
 def get_room_queue(room_id: int, db: Session = Depends(get_db)):
     """Список треков в очереди комнаты."""
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
     tracks = db.query(RoomTrack).filter(RoomTrack.room_id == room_id).order_by(RoomTrack.order).all()
+    if not tracks:
+        state = get_room_state(db, room) or {}
+        current_track = state.get("current_track")
+        if current_track:
+            tracks = [current_track]
+
     return {
         "tracks": [
             {
@@ -52,7 +63,7 @@ def get_room_queue(room_id: int, db: Session = Depends(get_db)):
                 "duration": t.duration,
                 "thumbnail": t.thumbnail or "",
                 "genre": t.genre or "",
-                "added_by": t.added_by.username if t.added_by else "Unknown",
+                "added_by_id": getattr(t, "added_by_id", None),
             }
             for t in tracks
         ]

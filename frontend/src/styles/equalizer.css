@@ -13,7 +13,10 @@ input[type=range][orient="vertical"] {
 
 /* Webkit вертикальный slider */
 input[type=range].eq-slider {
-  -webkit-appearance: slider-vertical;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  -webkit-appearance: none;
+  appearance: none;
   width: 24px;
   height: 90px;
   accent-color: var(--accent);

@@ -1,9 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clearToken, getToken } from '../utils/auth';
+import { showToast } from '../utils/toast';
 
 function fmtSec(s) {
   const v = Math.max(0, Math.floor(Number(s) || 0));
   return `${Math.floor(v / 60)}:${String(v % 60).padStart(2, '0')}`;
+}
+
+function normalizeTrackMeta(track) {
+  const next = { ...(track || {}) };
+  const title = String(next.title || '').trim();
+  const artist = String(next.artist || '').trim();
+
+  // Always try to split "Artist – Track" from the title, even if artist is already set.
+  // This handles cases like "MAYOT – Забывай" where artist may be unknown/empty.
+  for (const sep of [' — ', ' – ', ' - ']) {
+    if (!title.includes(sep)) continue;
+    const [left, ...rest] = title.split(sep);
+    const right = rest.join(sep).trim();
+    if (left.trim() && right) return { ...next, artist: left.trim(), title: right };
+  }
+
+  // Fall back to provided artist if it is meaningful
+  const unknownArtists = ['', 'unknown', 'неизвестно', '—', '-'];
+  if (!unknownArtists.includes(artist.toLowerCase())) return next;
+
+  return next;
 }
 
 export default function LivePage() {
@@ -27,8 +49,15 @@ export default function LivePage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [chatText, setChatText] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
+  const [inserts, setInserts] = useState([]);
+  const [insertText, setInsertText] = useState('');
+  const [insertVoice, setInsertVoice] = useState('en_US-libritts-high');
+  const [insertAfterTrackId, setInsertAfterTrackId] = useState('');
+  const [insertSending, setInsertSending] = useState(false);
+  const [ttsStatus, setTtsStatus] = useState(null);
   const wsRef = useRef(null);
   const dragSourceIdRef = useRef(null);
+  const lastRoomStateRef = useRef(null);
 
   useEffect(() => {
     // Всегда загружаем комнаты (не требуют авторизации)
@@ -62,6 +91,16 @@ export default function LivePage() {
     checkStatus(selectedRoomId);
     loadQueue(selectedRoomId);
   }, [selectedRoomId]);
+
+  useEffect(() => {
+    fetch('/api/voice/status')
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (data) setTtsStatus(data);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!startedAtMs) {
@@ -112,9 +151,91 @@ export default function LivePage() {
       const res = await fetch(`/stream/queue/${roomId}`, { headers: authHeaders() });
       if (!res.ok) return;
       const data = await res.json();
-      setQueue(data.tracks || data || []);
+      setQueue((data.tracks || data || []).map(normalizeTrackMeta));
     } catch {
       // noop
+    }
+  }
+
+  function getTrackQueueStatus(track) {
+    const trackStatus = String(track?.download_status || track?.status || '').toLowerCase();
+    const streamUrl = String(track?.stream_url || '').trim();
+    const isDownloading = trackStatus
+      ? ['pending', 'generating', 'downloading', 'queued'].includes(trackStatus)
+      : (!streamUrl || streamUrl === 'pending://local-upload');
+
+    return {
+      key: isDownloading ? 'downloading' : 'ready',
+      label: isDownloading ? 'Скачивается' : 'Готово',
+    };
+  }
+
+  function buildRoomTrackPayload(track) {
+    return normalizeTrackMeta({
+      source: track.source || (track.source_track_id ? 'soundcloud' : 'youtube'),
+      source_track_id: track.source_track_id || track.track_page_url || track.page_url || String(track.id || ''),
+      title: track.title || 'Без названия',
+      artist: track.artist || 'Unknown',
+      duration: Number(track.duration) || 0,
+      stream_url: track.stream_url || track.url || '',
+      thumbnail: track.thumbnail || track.thumb_url || null,
+      genre: track.genre || null,
+    });
+  }
+
+  function isTrackReadyForQueue(track) {
+    const status = String(track?.download_status || track?.status || '').toLowerCase();
+    const stream = String(track?.stream_url || track?.url || '').trim();
+    if (status && ['pending', 'generating', 'downloading', 'queued'].includes(status)) return false;
+    if (!stream || stream === 'pending://local-upload') return false;
+    return true;
+  }
+
+  async function addTrackToEnd(track) {
+    if (!selectedRoomId) return;
+
+    if (!isTrackReadyForQueue(track)) {
+      showToast('Сначала дождитесь загрузки трека', 'error');
+      return;
+    }
+
+    const trackId = Number(track?.id);
+    const existingIdx = queue.findIndex((item) => Number(item.id) === trackId);
+
+    if (existingIdx >= 0) {
+      const nextQueue = [
+        ...queue.slice(0, existingIdx),
+        ...queue.slice(existingIdx + 1),
+        queue[existingIdx],
+      ];
+      setQueue(nextQueue);
+      wsSend({
+        type: 'reorder_queue',
+        order: nextQueue.map((item) => item.id),
+      });
+      return;
+    }
+
+    const payload = buildRoomTrackPayload(track);
+    try {
+      const res = await fetch(`/rooms/${selectedRoomId}/tracks`, {
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Ошибка добавления трека', 'error');
+        return;
+      }
+
+      await loadQueue(selectedRoomId);
+      if (searchQuery.trim()) {
+        setSearchResults((prev) => prev.filter((item) => Number(item.id) !== trackId));
+      }
+    } catch {
+      showToast('Ошибка сети', 'error');
     }
   }
 
@@ -187,11 +308,13 @@ export default function LivePage() {
       setConnected(true);
       setRoomStatus(`Подключены: комната ${roomId}`);
       loadQueue(roomId);
+      try { ws.send(JSON.stringify({ type: 'insert_list' })); } catch {}
     };
 
     ws.onclose = () => {
       setConnected(false);
       setRoomStatus('Отключены');
+      setInserts([]);
     };
 
     ws.onmessage = (event) => {
@@ -203,6 +326,7 @@ export default function LivePage() {
       }
 
       if (msg.type === 'room_state') {
+        lastRoomStateRef.current = msg.data || msg;
         onRoomState(msg);
       }
 
@@ -216,12 +340,19 @@ export default function LivePage() {
 
       if (msg.type === 'track_changed') {
         if (msg.track) {
+          // started_at — UNIX timestamp от сервера, используем для точной синхронизации
+          const startedAt = Number(msg.track.started_at);
           setNowPlaying(msg.track);
           setNowPlayingId(msg.track.id || null);
-          setStartedAtMs(Date.now());
+          setStartedAtMs(
+            Number.isFinite(startedAt) && startedAt > 0
+              ? startedAt * 1000  // сервер шлёт секунды → JS ожидает миллисекунды
+              : Date.now()
+          );
           setDurationSec(Number(msg.track.duration) || 0);
           setBroadcastLive(true);
           setStatusText('Статус: активно');
+          // Не удаляем текущий трек — очередь показывает все треки, nowPlayingId выделяет играющий
         } else {
           setNowPlaying(null);
           setNowPlayingId(null);
@@ -230,19 +361,36 @@ export default function LivePage() {
           setBroadcastLive(false);
           setStatusText('Статус: не активно');
         }
-        loadQueue(roomId);
       }
 
       if (msg.type === 'track_change' && msg.data?.current_track) {
+        const startedAt = Number(msg.data.current_track.started_at);
         setNowPlaying(msg.data.current_track);
         setNowPlayingId(msg.data.current_track.id || null);
-        setStartedAtMs(Date.now());
+        setStartedAtMs(
+          Number.isFinite(startedAt) && startedAt > 0
+            ? startedAt * 1000
+            : Date.now()
+        );
         setDurationSec(Number(msg.data.current_track.duration) || 0);
-        loadQueue(roomId);
+        // Не удаляем текущий трек — очередь показывает все треки, nowPlayingId выделяет играющий
       }
 
       if (msg.type === 'queue_updated') {
-        loadQueue(roomId);
+        // WS-сервер не присылает тело очереди — берём из последнего room_state,
+        // или запрашиваем через HTTP
+        const lastState = lastRoomStateRef.current;
+        if (lastState && Array.isArray(lastState.queue) && lastState.queue.length) {
+          setQueue(lastState.queue.map(normalizeTrackMeta));
+        } else {
+          // Фоллбэк: HTTP запрос очереди
+          loadQueue(selectedRoomId);
+        }
+      }
+
+      if (msg.type === 'queue_reordered' && Array.isArray(msg.queue)) {
+        // Обновляем локальную копию очереди из WS payload
+        setQueue(msg.queue.map(normalizeTrackMeta));
       }
 
       if (msg.type === 'thumbnail_updated' && msg.track_id && msg.thumbnail) {
@@ -250,6 +398,77 @@ export default function LivePage() {
         if (msg.track_id === nowPlayingId && nowPlaying) {
           setNowPlaying({ ...nowPlaying, thumbnail: msg.thumbnail });
         }
+      }
+
+      // ── Voice insert (TTS) события ─────────────────────────────────
+      if (msg.type === 'insert_list' && Array.isArray(msg.inserts)) {
+        setInserts(msg.inserts.map((i) => ({
+          id: i.id,
+          text: i.text,
+          status: i.status,
+          scheduled_at: i.scheduled_at,
+          audio_url: i.audio_url || null,
+          duration_sec: i.duration_sec || null,
+          play_after_track_id: i.play_after_track_id || null,
+        })));
+      }
+
+      if (msg.type === 'insert_created' && msg.insert) {
+        setInserts((prev) => {
+          if (prev.some((p) => p.id === msg.insert.id)) return prev;
+          return [...prev, {
+            id: msg.insert.id,
+            text: msg.insert.text,
+            status: msg.insert.status || 'pending',
+            scheduled_at: msg.insert.scheduled_at,
+            play_after_track_id: msg.insert.play_after_track_id || insertAfterTrackId || null,
+          }];
+        });
+      }
+
+      if (msg.type === 'insert_ready' && msg.insert) {
+        setInserts((prev) => prev.map((i) => i.id === msg.insert.id
+          ? { ...i, status: 'ready', audio_url: msg.insert.audio_url || i.audio_url, duration_sec: msg.insert.duration_sec || i.duration_sec }
+          : i));
+      }
+
+      if (msg.type === 'insert_failed' && msg.insert) {
+        setInserts((prev) => prev.map((i) => i.id === msg.insert.id
+          ? { ...i, status: 'failed', error: msg.insert.error || 'TTS failed' }
+          : i));
+      }
+
+      if (msg.type === 'insert_timeout' && msg.insert) {
+        setInserts((prev) => prev.map((i) => i.id === msg.insert.id
+          ? { ...i, status: 'timeout' }
+          : i));
+      }
+
+      if (msg.type === 'insert_cancelled') {
+        const id = msg.insert_id || msg.id;
+        if (id) {
+          setInserts((prev) => prev.map((i) => i.id === id ? { ...i, status: 'cancelled' } : i));
+        }
+      }
+
+      if (msg.type === 'insert_cleared') {
+        setInserts((prev) => prev.map((i) => (
+          ['pending', 'generating', 'ready'].includes(i.status) ? { ...i, status: 'cancelled' } : i
+        )));
+      }
+
+      if (msg.type === 'voice_insert_status') {
+        const id = msg.insert_id;
+        const status = msg.status;
+        if (id && status) {
+          setInserts((prev) => prev.map((i) => i.id === id ? { ...i, status } : i));
+        }
+      }
+
+      if (msg.type === 'error' && msg.msg) {
+        setInserts((prev) => prev);
+        // Не критично — просто оповещаем в чате как системку
+        // alert(`TTS error: ${msg.msg}`);
       }
     };
   }
@@ -408,14 +627,7 @@ export default function LivePage() {
   }
 
   function addToQueue(track) {
-    const trackToSend = {
-      ...track,
-      source_track_id: track.track_page_url || track.source_track_id || String(track.id || ''),
-    };
-    const ok = wsSend({ type: 'track_change', track: trackToSend });
-    if (ok) {
-      setTimeout(() => loadQueue(selectedRoomId), 700);
-    }
+    return addTrackToEnd(track);
   }
 
   function sendChat() {
@@ -423,6 +635,92 @@ export default function LivePage() {
     if (!content) return;
     const ok = wsSend({ type: 'chat', content });
     if (ok) setChatText('');
+  }
+
+  // ── Voice insert (TTS) helpers ────────────────────────────────────────
+  function sendInsert() {
+    const text = insertText.trim();
+    if (!text) {
+      alert('Введите текст вставки');
+      return;
+    }
+    if (text.length < 2) {
+      alert('Минимум 2 символа');
+      return;
+    }
+    if (text.length > 500) {
+      alert('Максимум 500 символов');
+      return;
+    }
+    if (!connected) {
+      alert('Подключитесь к комнате');
+      return;
+    }
+    setInsertSending(true);
+    const ok = wsSend({
+      type: 'insert_create',
+      text,
+      voice_id: insertVoice || 'en_US-libritts-high',
+      play_after_track_id: insertAfterTrackId ? Number(insertAfterTrackId) : null,
+    });
+    if (ok) {
+      setInsertText('');
+    }
+    setTimeout(() => setInsertSending(false), 400);
+  }
+
+  function cancelInsert(insertId) {
+    if (!insertId) return;
+    wsSend({ type: 'insert_cancel', insert_id: insertId });
+  }
+
+  function clearAllInserts() {
+    if (!connected) return;
+    if (!window.confirm('Очистить все активные TTS-вставки?')) return;
+    wsSend({ type: 'insert_clear' });
+  }
+
+  function previewInsertAudio(audioUrl) {
+    if (!audioUrl) return;
+    try {
+      const audio = new Audio(audioUrl);
+      audio.play().catch(() => {});
+    } catch {
+      // noop
+    }
+  }
+
+  function insertStatusLabel(status) {
+    switch (status) {
+      case 'pending': return 'В очереди';
+      case 'generating': return 'Генерация…';
+      case 'ready': return 'Готова';
+      case 'playing': return 'Играет';
+      case 'played': return 'Отыграна';
+      case 'failed': return 'Ошибка';
+      case 'timeout': return 'Таймаут';
+      case 'cancelled': return 'Отменена';
+      default: return status || '—';
+    }
+  }
+
+  function queueFlowItems() {
+    const activeInserts = inserts.filter((i) => !['cancelled', 'failed', 'timeout'].includes(i.status));
+    const attached = new Set();
+    const flow = [];
+    queue.forEach((track) => {
+      flow.push({ kind: 'track', ...track });
+      activeInserts
+        .filter((ins) => Number(ins.play_after_track_id) === Number(track.id))
+        .forEach((ins) => {
+          attached.add(ins.id);
+          flow.push({ kind: 'insert', ...ins });
+        });
+    });
+    activeInserts
+      .filter((ins) => !ins.play_after_track_id || !attached.has(ins.id))
+      .forEach((ins) => flow.push({ kind: 'insert', ...ins }));
+    return flow;
   }
 
   function onDragStart(trackId) {
@@ -442,11 +740,11 @@ export default function LivePage() {
     next.splice(dstIdx, 0, moved);
     setQueue(next);
 
+    // Reorder через WebSocket вместо HTTP PUT (который может не поддерживаться)
     try {
-      await fetch(`/rooms/${selectedRoomId}/tracks/reorder`, {
-        method: 'PUT',
-        headers: authHeaders(true),
-        body: JSON.stringify({ order: next.map((t) => t.id) }),
+      wsSend({
+        type: 'reorder_queue',
+        order: next.map((t) => t.id),
       });
     } catch {
       // noop
@@ -471,6 +769,9 @@ export default function LivePage() {
     );
   }
 
+
+  const searchPanelItems = searchQuery.trim() ? searchResults : queue;
+  const isSearchPanelEmpty = searchQuery.trim() ? !searchResults.length : !queue.length;
   return (
     <div className="live-page live-admin-page">
       <div className="live-admin-shell glass glass-primary">
@@ -498,6 +799,59 @@ export default function LivePage() {
             </section>
 
             <section className="live-admin-section">
+              <h3>Комната</h3>
+              {selectedRoomId && currentUser && (
+                <button
+                  className="btn"
+                  style={{ background: '#ff5050', color: '#fff', marginTop: 8, width: '100%' }}
+                  onClick={async () => {
+                    if (!window.confirm('Удалить эту комнату? Это действие необратимо.')) return;
+                    if (!token) return;
+                    try {
+                      const res = await fetch(`/rooms/${selectedRoomId}`, {
+                        method: 'DELETE',
+                        headers: { Authorization: `Bearer ${token}` },
+                      });
+                      if (res.ok) {
+                        showToast('Комната удалена', 'success');
+                        setRooms((prev) => prev.filter((r) => r.id !== Number(selectedRoomId)));
+                        setSelectedRoomId('');
+                      } else {
+                        const err = await res.json().catch(() => ({}));
+                        showToast(err.detail || 'Ошибка удаления', 'error');
+                      }
+                    } catch {
+                      showToast('Ошибка сети', 'error');
+                    }
+                  }}
+                >
+                  <i className="fa-solid fa-trash-can" /> Удалить комнату
+                </button>
+              )}
+            </section>
+
+            <section className="live-admin-section">
+              <h3>Управление комнатой</h3>
+              <div className="live-admin-row" style={{ marginBottom: 10 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                  <span style={{ fontSize: '0.85rem' }}>Комната активна</span>
+                  <input
+                    type="checkbox"
+                    checked={broadcastLive}
+                    onChange={async (e) => {
+                      if (e.target.checked) {
+                        await doStartStream();
+                      } else {
+                        await doStopStream();
+                      }
+                    }}
+                    style={{ width: 18, height: 18, accentColor: 'var(--accent)' }}
+                  />
+                </label>
+              </div>
+            </section>
+
+            <section className="live-admin-section">
               <h3>Воспроизведение</h3>
               <div className="live-admin-hint">{statusText}</div>
               <div className="live-admin-row">
@@ -505,8 +859,6 @@ export default function LivePage() {
                 <button className="btn" onClick={doPause}>Pause</button>
               </div>
               <div className="live-admin-row">
-                {!broadcastLive && <button className="btn btn-accent" onClick={doStartStream}>Начать трансляцию</button>}
-                {broadcastLive && <button className="btn" onClick={doStopStream}>Остановить трансляцию</button>}
                 <button className="btn" onClick={skipNext}>Следующий</button>
               </div>
             </section>
@@ -518,7 +870,26 @@ export default function LivePage() {
               </div>
               <div className="live-admin-queue-list">
                 {!queue.length && <div className="empty-state"><p>Очередь пуста</p></div>}
-                {queue.map((t) => (
+                {queueFlowItems().map((t) => t.kind === 'insert' ? (
+                  <div className={`live-admin-queue-item voice-insert status-${t.status}`} key={`insert-${t.id}`}>
+                    <span className="drag"><i className="fa-solid fa-microphone-lines" /></span>
+                    <div className="ph"><i className="fa-solid fa-wave-square" /></div>
+                    <div className="meta">
+                      <div className="title">{t.text}</div>
+                      <div className="artist">TTS · {insertStatusLabel(t.status)}{t.duration_sec ? ` · ${Math.round(t.duration_sec)}s` : ''}</div>
+                    </div>
+                    {t.audio_url && (
+                      <button className="btn btn-icon" title="Прослушать" onClick={() => previewInsertAudio(t.audio_url)}>
+                        <i className="fa-solid fa-play" />
+                      </button>
+                    )}
+                    {['pending', 'generating', 'ready'].includes(t.status) && (
+                      <button className="btn btn-icon" title="Отменить" onClick={() => cancelInsert(t.id)}>
+                        <i className="fa-solid fa-xmark" />
+                      </button>
+                    )}
+                  </div>
+                ) : (
                   <div
                     key={t.id}
                     className={`live-admin-queue-item ${t.id === nowPlayingId ? 'playing' : ''}`}
@@ -567,16 +938,132 @@ export default function LivePage() {
 
               <div className="live-admin-results">
                 {searchLoading && <div className="empty-state"><p>Поиск...</p></div>}
-                {!searchLoading && !searchResults.length && <div className="empty-state"><p>Введите запрос для поиска</p></div>}
-                {!searchLoading && searchResults.map((t, idx) => (
-                  <div className="live-admin-result" key={`${t.title}-${idx}`}>
-                    <div className="meta">
-                      <div className="title">{t.title}</div>
-                      <div className="artist">{t.artist || '-'}</div>
-                    </div>
-                    <button className="btn" onClick={() => addToQueue(t)}>+ В очередь</button>
+                {!searchLoading && isSearchPanelEmpty && (
+                  <div className="empty-state">
+                    <p>{searchQuery.trim() ? 'Ничего не найдено' : 'Очередь пуста'}</p>
                   </div>
-                ))}
+                )}
+                {!searchLoading && searchPanelItems.map((t, idx) => {
+                  const shown = normalizeTrackMeta(t);
+                  const status = getTrackQueueStatus(t);
+                  return (
+                    <div className="live-admin-result" key={`${shown.id || shown.title}-${idx}`}>
+                      <div className="meta">
+                        <div className="title">{shown.title}</div>
+                        <div className="artist">
+                          {shown.artist || '-'}
+                          <span className={`live-admin-track-status live-admin-track-status-${status.key}`}>
+                            {status.label}
+                          </span>
+                        </div>
+                      </div>
+                      <button className="btn" onClick={() => addTrackToEnd(t)}>В конец очереди</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="live-admin-tts glass glass-secondary">
+              <div className="live-admin-tts-head">
+                <h3>Голосовые вставки (TTS)</h3>
+                {ttsStatus && (
+                  <span className={`live-admin-tts-badge ${ttsStatus.rvc_enabled ? 'on' : 'off'}`}>
+                    {ttsStatus.rvc_enabled ? 'RVC: вкл' : 'RVC: выкл'}
+                    {ttsStatus.device ? ` · ${ttsStatus.device}` : ''}
+                  </span>
+                )}
+              </div>
+
+              <div className="live-admin-row">
+                <input
+                  className="input"
+                  type="text"
+                  value={insertText}
+                  onChange={(e) => setInsertText(e.target.value)}
+                  placeholder="Текст вставки (English, 2–500 символов)"
+                  maxLength={500}
+                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendInsert())}
+                  disabled={!connected || insertSending}
+                />
+                <select
+                  className="input"
+                  value={insertVoice}
+                  onChange={(e) => setInsertVoice(e.target.value)}
+                  disabled={!connected || insertSending}
+                  style={{ maxWidth: 180 }}
+                >
+                  <option value="en_US-libritts-high">en_US-libritts-high</option>
+                </select>
+                <select
+                  className="input"
+                  value={insertAfterTrackId}
+                  onChange={(e) => setInsertAfterTrackId(e.target.value)}
+                  disabled={!connected || insertSending}
+                  style={{ maxWidth: 220 }}
+                  title="Позиция в очереди"
+                >
+                  <option value="">В конец / без привязки</option>
+                  {queue.map((t) => (
+                    <option key={t.id} value={t.id}>После: {t.title}</option>
+                  ))}
+                </select>
+                <button
+                  className="btn btn-accent"
+                  onClick={sendInsert}
+                  disabled={!connected || insertSending || !insertText.trim()}
+                >
+                  Отправить
+                </button>
+              </div>
+
+              <div className="live-admin-tts-meta">
+                <span className="live-admin-hint">{insertText.length}/500</span>
+                <button
+                  className="btn"
+                  onClick={clearAllInserts}
+                  disabled={!connected || !inserts.some((i) => ['pending', 'generating', 'ready'].includes(i.status))}
+                >
+                  Очистить активные
+                </button>
+              </div>
+
+              <div className="live-admin-tts-list">
+                {!inserts.length && <div className="empty-state"><p>Пока нет вставок</p></div>}
+                {inserts.map((ins) => {
+                  const canCancel = ['pending', 'generating', 'ready'].includes(ins.status);
+                  const canPlay = ins.audio_url && ['ready', 'playing', 'played'].includes(ins.status);
+                  return (
+                    <div className={`live-admin-tts-item status-${ins.status}`} key={ins.id}>
+                      <div className="meta">
+                        <div className="title">{ins.text}</div>
+                        <div className="artist">
+                          {insertStatusLabel(ins.status)}
+                          {ins.duration_sec ? ` · ${Math.round(ins.duration_sec)}s` : ''}
+                          {ins.error ? ` · ${ins.error}` : ''}
+                        </div>
+                      </div>
+                      {canPlay && (
+                        <button
+                          className="btn btn-icon"
+                          title="Прослушать"
+                          onClick={() => previewInsertAudio(ins.audio_url)}
+                        >
+                          <i className="fa-solid fa-play" />
+                        </button>
+                      )}
+                      {canCancel && (
+                        <button
+                          className="btn btn-icon"
+                          title="Отменить"
+                          onClick={() => cancelInsert(ins.id)}
+                        >
+                          <i className="fa-solid fa-xmark" />
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -604,7 +1091,7 @@ export default function LivePage() {
           </section>
         </div>
       </div>
-      {!connected && selectedRoomId && <div className="room-id-hint">Подключитесь к комнате для управления через WebSocket</div>}
+      {!connected && selectedRoomId && <div className="room-id-hint"></div>}
     </div>
   );
 }

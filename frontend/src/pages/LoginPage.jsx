@@ -77,20 +77,24 @@ export default function LoginPage() {
     event.preventDefault();
     setLoginError('');
 
-    const email = loginEmail.trim();
+    const identifier = loginEmail.trim();
     const password = loginPassword;
 
-    if (!email || !password) {
+    if (!identifier || !password) {
       setLoginError('Заполните все поля');
       return;
     }
 
     setLoginLoading(true);
     try {
+      const body = identifier.includes('@')
+        ? { email: identifier, password }
+        : { username: identifier, password };
+
       const response = await fetch('/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(body),
       });
 
       const data = await response.json().catch(() => ({}));
@@ -109,12 +113,16 @@ export default function LoginPage() {
     }
   }
 
-  async function autoLogin(email, password) {
+  async function autoLogin(identifier, password) {
     try {
+      const body = identifier.includes('@')
+        ? { email: identifier, password }
+        : { username: identifier, password };
+
       const response = await fetch('/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(body),
       });
       const data = await response.json().catch(() => ({}));
       if (response.ok && data.access_token) {
@@ -170,8 +178,8 @@ export default function LoginPage() {
         return;
       }
 
-      // Автологин с email из регистрационной формы (или username@omni-player.local)
-      await autoLogin(email || `${username}@omni-player.local`, password);
+      // Автологин через реальный email, а если его нет - через username.
+      await autoLogin(email || username, password);
     } catch {
       setRegisterError('Ошибка сети');
     } finally {
@@ -205,8 +213,8 @@ export default function LoginPage() {
             {loginError ? <div className="auth-error" id="loginError">{loginError}</div> : <div id="loginError" />}
 
             <div className="form-group-auth">
-              <label htmlFor="loginEmail">Логин</label>
-              <input id="loginEmail" className="input" type="email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} autoComplete="email" required />
+              <label htmlFor="loginEmail">Логин или email</label>
+              <input id="loginEmail" className="input" type="text" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} autoComplete="username" required />
             </div>
 
             <div className="form-group-auth">

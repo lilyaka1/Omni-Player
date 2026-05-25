@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:17-alpine
+    image: postgres:15-alpine
     environment:
       POSTGRES_DB: omni_player
       POSTGRES_USER: user
@@ -21,14 +21,23 @@ services:
       dockerfile: Dockerfile
     ports:
       - "3000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - DATABASE_URL=postgresql+psycopg://user:password@db:5432/omni_player
+      - TTS_AUDIO_DIR=/app/tts_audio
+      - TTS_MODEL_DIR=/app/tts_models
+      - PIPER_BIN=piper
+      - RVC_ENABLED=false
+    volumes:
+      - ./backend:/app
+      - ./frontend:/app/frontend
+      - ./tts_audio:/app/tts_audio
+      - ./tts_models:/app/tts_models
+      - ./downloads:/app/downloads
     depends_on:
       db:
         condition: service_healthy
-    env_file:
-      - ./backend/.env
-    volumes:
-      - ./downloads:/app/downloads
-    restart: unless-stopped
 
   frontend:
     build:
@@ -36,16 +45,10 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5173:5173"
-    volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
-      - ./frontend/vite.config.js:/app/vite.config.js
-      - ./frontend/index.html:/app/index.html
     depends_on:
       - backend
     environment:
-      - VITE_API_URL=http://localhost:3000
-    restart: unless-stopped
+      - VITE_API_BASE_URL=http://localhost:3000
 
 volumes:
   postgres_data:

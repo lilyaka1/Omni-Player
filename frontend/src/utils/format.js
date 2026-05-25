@@ -12,3 +12,8 @@ export function formatTime(seconds) {
   const s = Math.floor(seconds % 60);
   return `${m}:${String(s).padStart(2, '0')}`;
 }
+
+// Backward-compatible alias used by some React components.
+export function formatDuration(seconds) {
+  return formatTime(seconds);
+}

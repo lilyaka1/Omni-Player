@@ -1,8 +1,10 @@
 """SoundCloud API integration module"""
+from pathlib import Path
 from typing import List, Optional, Dict
-import yt_dlp
+import asyncio
+import os
 import re
-import httpx
+import yt_dlp
 
 class SoundCloudClient:
     """Client for SoundCloud integration - uses yt-dlp for search"""
@@ -254,5 +256,105 @@ class SoundCloudClient:
             import traceback
             traceback.print_exc()
             return None
+
+    async def download_to_file(self, track_url: str, output_dir: Path,
+                                filename_stem: str) -> Optional[Dict]:
+        """
+        Скачивает трек целиком как .mp3 в output_dir/{filename_stem}.mp3.
+        Возвращает {path, title, artist, duration, thumbnail, genre} или None.
+        Идемпотентно: если файл уже есть и не пустой, скачивание пропускается.
+        """
+        if not track_url:
+            return None
+
+        track_url = str(track_url).strip()
+        if track_url.isdigit():
+            track_url = f"https://api.soundcloud.com/tracks/{track_url}"
+        elif 'soundcloud.com' not in track_url and 'youtube.com' not in track_url and 'youtu.be' not in track_url:
+            print(f"⚠️ download_to_file: invalid URL {track_url}")
+            return None
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        target_file = output_dir / f"{filename_stem}.mp3"
+
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'no_color': True,
+            'socket_timeout': 30,
+            'outtmpl': str(output_dir / f"{filename_stem}.%(ext)s"),
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        }
+
+        def _download_sync():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                return ydl.extract_info(track_url, download=True)
+
+        try:
+            if target_file.exists() and target_file.stat().st_size > 100 * 1024:
+                # Уже есть полный файл — только метаданные подтянем
+                info = await self.get_track_info(track_url)
+                meta = info or {}
+                return {
+                    "path": str(target_file),
+                    "title": meta.get("title", filename_stem),
+                    "artist": meta.get("artist", "Unknown"),
+                    "duration": meta.get("duration", 0),
+                    "thumbnail": meta.get("thumbnail", ""),
+                    "genre": meta.get("genre", ""),
+                }
+
+            print(f"⬇️ [download] {track_url} → {target_file}")
+            info = await asyncio.to_thread(_download_sync)
+            if not info:
+                return None
+
+            if not target_file.exists():
+                # yt-dlp мог положить файл с другим именем — найдём
+                produced = list(output_dir.glob(f"{filename_stem}.*"))
+                mp3s = [p for p in produced if p.suffix.lower() == ".mp3"]
+                if mp3s:
+                    target_file = mp3s[0]
+
+            if not target_file.exists() or target_file.stat().st_size < 100 * 1024:
+                print(f"❌ [download] file too small or missing: {target_file}")
+                return None
+
+            # Подгружаем thumbnail из info
+            raw_thumb = info.get('thumbnail') or ''
+            if not raw_thumb:
+                thumbs = info.get('thumbnails') or []
+                for t in thumbs:
+                    if t.get('id') == 't500x500':
+                        raw_thumb = t['url']
+                        break
+                if not raw_thumb and thumbs:
+                    best = max((t for t in thumbs if t.get('width')), key=lambda t: t.get('width', 0), default=None)
+                    raw_thumb = best['url'] if best else ''
+            if raw_thumb and 'sndcdn.com' in raw_thumb and '-t500x500' not in raw_thumb:
+                raw_thumb = re.sub(r'-(large|t\d+x\d+|mini|tiny|small|badge|t67x67|crop|original)\.(jpg|png)', '-t500x500.jpg', raw_thumb)
+
+            print(f"✅ [download] saved {target_file} ({target_file.stat().st_size / 1024:.0f} KB)")
+            return {
+                "path": str(target_file),
+                "title": info.get('title', filename_stem),
+                "artist": info.get('uploader') or info.get('creator') or "Unknown",
+                "duration": info.get('duration', 0),
+                "thumbnail": raw_thumb,
+                "genre": info.get('genre', ''),
+            }
+
+        except Exception as e:
+            print(f"❌ [download] error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+
 # Global client instance
 soundcloud_client = SoundCloudClient()

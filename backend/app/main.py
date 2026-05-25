@@ -1,76 +1,83 @@
-from contextlib import asynccontextmanager
+import os
+import sys
+import logging
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logging.basicConfig(
+    level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+backend_dir = Path(__file__).parent.parent
+sys.path.insert(0, str(backend_dir))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from contextlib import asynccontextmanager
 
-from app.database.session import engine
-from app.database.models import Base
-from app.core.config import settings
+# Directories
+static_dir = backend_dir / "static"
+output_dir = backend_dir / "output"
+tts_audio_dir = backend_dir / "tts_audio"
+uploads_dir = static_dir / "uploads"
+avatars_dir = uploads_dir / "avatars"
+covers_dir = uploads_dir / "covers"
+room_covers_dir = uploads_dir / "room-covers"
+static_dir.mkdir(exist_ok=True)
+output_dir.mkdir(exist_ok=True)
+tts_audio_dir.mkdir(exist_ok=True)
+uploads_dir.mkdir(parents=True, exist_ok=True)
+avatars_dir.mkdir(parents=True, exist_ok=True)
+covers_dir.mkdir(parents=True, exist_ok=True)
+room_covers_dir.mkdir(parents=True, exist_ok=True)
 
-# Домены
-from app.domains.auth.router import router as auth_router
-from app.domains.rooms.router import router as rooms_router
-from app.domains.tracks.router import router as tracks_router
-
-# Admin
-# from app.admin.routes import router as admin_router
-
-# WebSocket
-# from app.websocket.router import router as websocket_router
-
-# Player
-# from app.player.routes import router as player_router
-
-import os
-
-
+# ── Lifespan: startup / shutdown ───────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup и shutdown приложения."""
-    # ── Startup ──────────────────────────────────────────────────────
-    with engine.begin() as conn:
-        Base.metadata.create_all(conn)
-
-    from app.database.session import SessionLocal
-    from app.database.models import Room
-
-    db = SessionLocal()
+    # ── Startup ────────────────────────────────────────────────────────────
+    # Инициализируем VoiceInsert таблицу
     try:
-        rooms = db.query(Room).filter(Room.is_playing == True).all()
-        for room in rooms:
-            room.is_playing = False
-        if rooms:
-            db.commit()
-            print(f"🔄 Startup: сброшен is_playing для {len(rooms)} комнат")
+        from app.database.session import engine
+        from app.database.models import Base
+        from app.voice_inserts.model import VoiceInsert  # noqa: ensure table exists
+        with engine.begin() as conn:
+            Base.metadata.create_all(conn)
+        logger.info("✅ VoiceInsert table ready")
     except Exception as e:
-        print(f"⚠️ Startup room reset error: {e}")
-    finally:
-        db.close()
+        logger.warning(f"⚠️ VoiceInsert table init: {e}")
 
-    print("✅ Application startup complete")
+    # Применяем idempotent SQLite миграции для новых полей
+    try:
+        from app.database.session import engine
+        from app.database.auto_migrate import run_auto_migrations
+        run_auto_migrations(engine)
+    except Exception as e:
+        logger.warning(f"⚠️ auto-migrate failed: {e}")
 
+    # Prewarm TTS cache + запускаем timeout checker
+    import asyncio
+    try:
+        from app.voice_inserts.tts import prewarm_cache
+        from app.voice_inserts.queue import insert_timeout_checker
+        asyncio.create_task(prewarm_cache())
+        asyncio.create_task(insert_timeout_checker())
+        logger.info("✅ Voice Insert background tasks started")
+    except Exception as e:
+        logger.warning(f"⚠️ Voice Insert tasks: {e}")
+
+    logger.info("🚀 Omni Player API started")
     yield
 
-    # ── Shutdown ─────────────────────────────────────────────────────
-    from app.room.manager import room_manager
-
-    print("🛑 Shutting down broadcasts...")
-    room_ids = list(room_manager.broadcasts.keys())
-    for room_id in room_ids:
-        try:
-            await room_manager.stop_room(room_id)
-        except Exception as e:
-            print(f"⚠️ Failed to stop room {room_id}: {e}")
-
-    print("✅ Application shutdown complete")
+    # ── Shutdown ────────────────────────────────────────────────────────────
+    logger.info("🛑 Omni Player API shutting down...")
 
 
-app = FastAPI(
-    title=settings.API_TITLE,
-    version=settings.API_VERSION,
-    lifespan=lifespan,
-)
+app = FastAPI(title="Omni Player API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,90 +87,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Static mounts
+app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+app.mount("/tts", StaticFiles(directory=str(tts_audio_dir)), name="tts")
+logger.info(f"📁 Static: {static_dir}, TTS: {tts_audio_dir}")
 
-# Роутеры
-app.include_router(auth_router)
-app.include_router(rooms_router)
-app.include_router(tracks_router)
-# app.include_router(admin_router)
-# app.include_router(websocket_router)
-# app.include_router(player_router)
+# ── Routers ─────────────────────────────────────────────────────────────────
+def _register(name: str, module_path: str):
+    try:
+        import importlib
+        module = importlib.import_module(module_path)
+        router = getattr(module, "router", None)
+        if router:
+            app.include_router(router)
+            # Backward compatibility for old frontend bundles that call /api/auth/*.
+            if name == "Auth":
+                app.include_router(router, prefix="/api")
+            logger.info(f"✅ {name} router registered")
+        else:
+            logger.warning(f"⚠️ {name}: no router attribute")
+    except ImportError as e:
+        logger.warning(f"⚠️ {name} not available: {e}")
 
-# Статика
-base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-static_dir = os.path.join(base_dir, "static")
-if os.path.exists(static_dir):
-    print(f"✅ Mounting static files from: {static_dir}")
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
-else:
-    print(f"❌ Static directory not found: {static_dir}")
+_register("Auth", "app.domains.auth.router")
+_register("Rooms", "app.domains.rooms.router")
+_register("Tracks", "app.domains.tracks.router")
+_register("Player", "app.player.routes")
+_register("Profiles", "app.domains.profiles.router")
+_register("Voice", "app.voice_inserts.router")
+_register("WebSocket", "app.websocket.router")
+_register("Stream", "app.stream.router")
 
-# HTML маршруты
-templates_dir = os.path.join(base_dir, "templates")
-
-
-def _serve_html(path: str):
-    if os.path.exists(path):
-        return FileResponse(path, media_type="text/html")
-    return {"error": f"{os.path.basename(path)} not found"}
-
-
-@app.get("/live")
-async def live():
-    p = os.path.join(base_dir, "live.html")
-    return _serve_html(p)
-
-
-@app.get("/live.html")
-async def live_html():
-    p = os.path.join(base_dir, "live.html")
-    return _serve_html(p)
-
-
-@app.get("/login")
-async def login():
-    p = os.path.join(base_dir, "login.html")
-    return _serve_html(p)
-
-
-@app.get("/login.html")
-async def login_html():
-    p = os.path.join(base_dir, "login.html")
-    return _serve_html(p)
-
-
-@app.get("/user")
-async def user():
-    return _serve_html(os.path.join(templates_dir, "room", "player.html"))
-
-
-@app.get("/user.html")
-async def user_html():
-    p = os.path.join(base_dir, "user.html")
-    return _serve_html(p)
-
-
-@app.get("/player")
-async def player():
-    return _serve_html(os.path.join(base_dir, "player.html"))
-
-
-@app.get("/player.html")
-async def player_html():
-    p = os.path.join(base_dir, "player.html")
-    return _serve_html(p)
-
-
-@app.get("/")
-async def root():
-    return _serve_html(os.path.join(templates_dir, "base.html"))
-
-
-@app.get("/health")
+# ── Routes ─────────────────────────────────────────────────────────────────
+@app.get("/api/health")
 async def health():
-    return {"status": "ok"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    return {"status": "ok", "version": "1.0.0"}

@@ -1,0 +1,25 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install runtime system deps (keep minimal for fast build)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postgresql-client \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python deps (skip requirements-rvc which pulls heavy ML wheels)
+COPY requirements.txt ./
+ENV PIP_DEFAULT_TIMEOUT=120
+RUN pip install --no-cache-dir --retries 10 --default-timeout 120 -r requirements.txt
+
+# Copy application code (compose mounts ./app for live code during development)
+COPY . .
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Run app
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

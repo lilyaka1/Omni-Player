@@ -1,19 +1,38 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { authFetch, clearToken, getToken } from '../utils/auth';
+import { useEffect, useMemo, useState } from 'react';
+import { clearToken, getToken } from '../utils/auth';
 import { formatTime } from '../utils/format';
+import AudioManager from '../utils/AudioManager';
+import QueueStore from '../utils/QueueStore';
+import { setupKeyboardShortcuts } from '../utils/keyboardShortcuts';
 import { showToast } from '../utils/toast';
+
+// Импорт компонентов
+import PlayerControls from '../components/PlayerControls';
+import TrackList from '../components/TrackList';
+import SearchPanel from '../components/SearchPanel';
+import EditTrackModal from '../components/EditTrackModal';
+
+// Импорт хуков
+import useLibraryData from '../hooks/useLibraryData';
+import useSearch from '../hooks/useSearch';
 
 function normalizeLibraryTrack(item, token) {
   const t = item && item.track ? item.track : item;
   if (!t || typeof t !== 'object') return null;
   const playable = Boolean(t.local_file_path || t.source === 'local');
+  const sourcePageUrl = t.source_page_url || t.page_url || null;
   return {
     id: t.id,
     title: t.title,
     artist: t.artist,
+    album: t.album || '',
+    genre: t.genre || '',
+    year: t.year || null,
     duration: t.duration,
     thumbnail: t.thumbnail || t.thumbnail_url || null,
     source: t.source,
+    sourcePageUrl,
+    canRedownload: Boolean(sourcePageUrl) && !String(sourcePageUrl).startsWith('local-upload://'),
     localFilePath: t.local_file_path || null,
     playable,
     playUrl: playable ? `/api/player/audio/${t.id}?token=${encodeURIComponent(token || '')}` : null,
@@ -22,23 +41,61 @@ function normalizeLibraryTrack(item, token) {
 
 export default function LibraryPage() {
   const token = getToken();
-  const audioRef = useRef(null);
   const [authState, setAuthState] = useState('checking');
-  const [libraryTracks, setLibraryTracks] = useState([]);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  
+  // Используем хуки для управления данными
+  const {
+    libraryTracks: rawLibraryTracks,
+    downloadsDir,
+    downloadsPath,
+    loadLibrary,
+    loadDownloadSettings,
+    saveDownloadSettings,
+    uploadFiles: uploadFilesHook,
+    addByUrl: addByUrlHook,
+    removeTrack,
+    updateTrackMetadata,
+    uploadCover,
+    redownloadTrack: redownloadTrackHook,
+    redownloadingId,
+  } = useLibraryData();
+
+  const {
+    searchQuery,
+    setSearchQuery,
+    searchSource,
+    setSearchSource,
+    searchResults,
+    searchLoading,
+    doSearch,
+  } = useSearch();
+
+  // Нормализуем треки библиотеки
+  const libraryTracks = useMemo(
+    () => rawLibraryTracks.map((item) => normalizeLibraryTrack(item, token)).filter(Boolean),
+    [rawLibraryTracks, token]
+  );
+
+  // Состояние плеера
+  const [currentTrack, setCurrentTrack] = useState(QueueStore.getCurrentTrack());
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(0.85);
-  const [shuffle, setShuffle] = useState(false);
-  const [repeatOne, setRepeatOne] = useState(false);
-  const [searchSource, setSearchSource] = useState('youtube');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [searchLoading, setSearchLoading] = useState(false);
+  const [volume, setVolume] = useState(AudioManager.getVolume());
+  const [shuffle, setShuffle] = useState(QueueStore.isShuffle());
+  const [repeatMode, setRepeatMode] = useState(QueueStore.getRepeatMode());
+
+  // Состояние модалок
   const [showAddUrlModal, setShowAddUrlModal] = useState(false);
   const [addUrl, setAddUrl] = useState('');
+  const [downloadsDirInput, setDownloadsDirInput] = useState('');
+  const [savingDownloadsDir, setSavingDownloadsDir] = useState(false);
+  const [editTrack, setEditTrack] = useState(null);
+  const [editForm, setEditForm] = useState({ title: '', artist: '', album: '', genre: '', year: '' });
+  const [editSaving, setEditSaving] = useState(false);
+  const [coverUploading, setCoverUploading] = useState(false);
 
+  // Проверка авторизации
   useEffect(() => {
     if (!token) {
       setAuthState('unauthorized');
@@ -48,12 +105,15 @@ export default function LibraryPage() {
 
     async function validateAuth() {
       try {
-        const res = await authFetch('/auth/me');
+        const res = await fetch('/auth/me', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
         if (!res.ok) {
           throw new Error('unauthorized');
         }
         if (cancelled) return;
         setAuthState('authorized');
+        await loadDownloadSettings().catch(() => null);
         loadLibrary();
       } catch {
         if (cancelled) return;
@@ -67,28 +127,29 @@ export default function LibraryPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [token, loadLibrary, loadDownloadSettings]);
 
-  const currentTrack = libraryTracks[currentIndex] || null;
+  useEffect(() => {
+    setDownloadsDirInput(downloadsDir || '');
+  }, [downloadsDir]);
+
   const playableTracks = useMemo(() => libraryTracks.filter((track) => track.playUrl), [libraryTracks]);
   const totalCount = useMemo(() => libraryTracks.length, [libraryTracks]);
 
+  // Подписка на события AudioManager
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return undefined;
-
-    const onLoadedMetadata = () => {
-      setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+    const onLoadedMetadata = ({ duration: dur }) => {
+      setDuration(Number.isFinite(dur) ? dur : 0);
     };
 
-    const onTimeUpdate = () => {
-      setCurrentTime(audio.currentTime || 0);
+    const onTimeUpdate = ({ currentTime: time }) => {
+      setCurrentTime(time || 0);
     };
 
     const onEnded = () => {
-      if (repeatOne) {
-        audio.currentTime = 0;
-        audio.play().catch(() => setIsPlaying(false));
+      if (repeatMode === 'one') {
+        AudioManager.seek(0);
+        AudioManager.play();
         return;
       }
       playNext();
@@ -102,74 +163,197 @@ export default function LibraryPage() {
     const onPlay = () => setIsPlaying(true);
     const onPause = () => setIsPlaying(false);
 
-    audio.addEventListener('loadedmetadata', onLoadedMetadata);
-    audio.addEventListener('timeupdate', onTimeUpdate);
-    audio.addEventListener('ended', onEnded);
-    audio.addEventListener('error', onError);
-    audio.addEventListener('play', onPlay);
-    audio.addEventListener('pause', onPause);
+    AudioManager.on('loadedmetadata', onLoadedMetadata);
+    AudioManager.on('timeupdate', onTimeUpdate);
+    AudioManager.on('ended', onEnded);
+    AudioManager.on('error', onError);
+    AudioManager.on('play', onPlay);
+    AudioManager.on('pause', onPause);
 
     return () => {
-      audio.removeEventListener('loadedmetadata', onLoadedMetadata);
-      audio.removeEventListener('timeupdate', onTimeUpdate);
-      audio.removeEventListener('ended', onEnded);
-      audio.removeEventListener('error', onError);
-      audio.removeEventListener('play', onPlay);
-      audio.removeEventListener('pause', onPause);
+      AudioManager.off('loadedmetadata', onLoadedMetadata);
+      AudioManager.off('timeupdate', onTimeUpdate);
+      AudioManager.off('ended', onEnded);
+      AudioManager.off('error', onError);
+      AudioManager.off('play', onPlay);
+      AudioManager.off('pause', onPause);
     };
-  }, [repeatOne, libraryTracks.length]);
+  }, [repeatMode]);
 
+  // Подписка на события QueueStore
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    const onQueueChange = () => {
+      setCurrentTrack(QueueStore.getCurrentTrack());
+    };
 
-    if (!currentTrack?.playUrl) {
-      audio.removeAttribute('src');
-      audio.load();
+    const onIndexChange = () => {
+      setCurrentTrack(QueueStore.getCurrentTrack());
+    };
+
+    const onShuffleChange = ({ shuffle: shuffleEnabled }) => {
+      setShuffle(shuffleEnabled);
+    };
+
+    const onRepeatChange = ({ repeatMode: mode }) => {
+      setRepeatMode(mode);
+    };
+
+    QueueStore.on('queuechange', onQueueChange);
+    QueueStore.on('indexchange', onIndexChange);
+    QueueStore.on('shufflechange', onShuffleChange);
+    QueueStore.on('repeatchange', onRepeatChange);
+
+    return () => {
+      QueueStore.off('queuechange', onQueueChange);
+      QueueStore.off('indexchange', onIndexChange);
+      QueueStore.off('shufflechange', onShuffleChange);
+      QueueStore.off('repeatchange', onRepeatChange);
+    };
+  }, []);
+
+  // Синхронизация библиотеки с QueueStore
+  useEffect(() => {
+    QueueStore.setQueue(libraryTracks);
+  }, [libraryTracks]);
+
+  // Загрузка трека в AudioManager при изменении currentTrack
+  useEffect(() => {
+    if (currentTrack?.playUrl) {
+      AudioManager.loadTrack(currentTrack);
+      setDuration(Number(currentTrack.duration) || 0);
+    } else {
+      AudioManager.loadTrack(null);
       setCurrentTime(0);
       setDuration(0);
       setIsPlaying(false);
-      return;
     }
+  }, [currentTrack?.id]);
 
-    audio.volume = volume;
-    audio.src = currentTrack.playUrl;
-    audio.load();
-    setCurrentTime(0);
-    setDuration(Number(currentTrack.duration) || 0);
-  }, [currentTrack?.playUrl, currentTrack?.id]);
-
+  // Автовоспроизведение при изменении isPlaying
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !currentTrack?.playUrl) return;
+    if (!currentTrack?.playUrl) return;
 
     if (isPlaying) {
-      const tryPlay = async () => {
-        try {
-          await audio.play();
-        } catch {
-          setIsPlaying(false);
-        }
-      };
-      tryPlay();
+      AudioManager.play().catch(() => setIsPlaying(false));
+    } else {
+      AudioManager.pause();
+    }
+  }, [isPlaying, currentTrack?.playUrl]);
+
+  // Preload следующего трека
+  useEffect(() => {
+    const currentIndex = QueueStore.getCurrentIndex();
+    const nextIndex = QueueStore.findNextPlayableIndex(1);
+    
+    // Если нет следующего трека или это тот же трек
+    if (nextIndex < 0 || nextIndex === currentIndex) {
       return;
     }
 
-    audio.pause();
-  }, [isPlaying, currentTrack?.playUrl]);
-
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    audio.volume = volume;
-  }, [volume]);
-
-  useEffect(() => {
-    if (currentIndex >= libraryTracks.length) {
-      setCurrentIndex(0);
+    const nextTrack = QueueStore.getQueue()[nextIndex];
+    if (!nextTrack?.playUrl) {
+      return;
     }
-  }, [libraryTracks.length, currentIndex]);
 
+    // Создаём скрытый audio элемент для preload
+    const preloadAudio = document.createElement('audio');
+    preloadAudio.preload = 'auto';
+    preloadAudio.src = nextTrack.playUrl;
+    preloadAudio.style.display = 'none';
+    
+    // Добавляем в DOM
+    document.body.appendChild(preloadAudio);
+
+    // Cleanup при unmount или изменении currentTrack
+    return () => {
+      preloadAudio.pause();
+      preloadAudio.src = '';
+      document.body.removeChild(preloadAudio);
+    };
+  }, [currentTrack?.id]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    let savedVolume = volume;
+
+    const handlers = {
+      togglePlay: () => {
+        AudioManager.togglePlay();
+      },
+
+      next: () => {
+        const nextTrack = QueueStore.next();
+        if (nextTrack) {
+          AudioManager.loadTrack(nextTrack);
+          setIsPlaying(true);
+        }
+      },
+
+      previous: () => {
+        const prevTrack = QueueStore.previous();
+        if (prevTrack) {
+          AudioManager.loadTrack(prevTrack);
+          setIsPlaying(true);
+        }
+      },
+
+      seekForward: (seconds) => {
+        const newTime = AudioManager.getCurrentTime() + seconds;
+        AudioManager.seek(newTime);
+      },
+
+      seekBackward: (seconds) => {
+        const newTime = AudioManager.getCurrentTime() - seconds;
+        AudioManager.seek(newTime);
+      },
+
+      volumeUp: (delta) => {
+        const newVolume = Math.min(1, volume + delta);
+        setVolume(newVolume);
+        AudioManager.setVolume(newVolume);
+      },
+
+      volumeDown: (delta) => {
+        const newVolume = Math.max(0, volume - delta);
+        setVolume(newVolume);
+        AudioManager.setVolume(newVolume);
+      },
+
+      toggleMute: () => {
+        if (volume > 0) {
+          savedVolume = volume;
+          setVolume(0);
+          AudioManager.setVolume(0);
+        } else {
+          const restoreVolume = savedVolume > 0 ? savedVolume : 0.85;
+          setVolume(restoreVolume);
+          AudioManager.setVolume(restoreVolume);
+        }
+      },
+
+      toggleShuffle: () => {
+        QueueStore.setShuffle(!shuffle);
+      },
+
+      toggleRepeat: () => {
+        const modes = ['off', 'one', 'all'];
+        const currentIdx = modes.indexOf(repeatMode);
+        const nextMode = modes[(currentIdx + 1) % modes.length];
+        QueueStore.setRepeatMode(nextMode);
+      },
+
+      seekToPercent: (percent) => {
+        const targetTime = (duration || 0) * (percent / 100);
+        AudioManager.seek(targetTime);
+      },
+    };
+
+    const cleanup = setupKeyboardShortcuts(handlers);
+
+    return cleanup;
+  }, [volume, shuffle, repeatMode, duration]);
+
+  // Функции управления плеером
   function playTrackByIndex(index) {
     if (index < 0 || index >= libraryTracks.length) return;
     const track = libraryTracks[index];
@@ -177,43 +361,22 @@ export default function LibraryPage() {
       showToast('Этот трек пока не доступен для локального прослушивания', 'error');
       return;
     }
-    setCurrentIndex(index);
+    QueueStore.setCurrentIndex(index);
     setIsPlaying(true);
-  }
-
-  function findNextPlayableIndex(direction = 1) {
-    if (!libraryTracks.length) return -1;
-    const start = currentIndex;
-    for (let step = 1; step <= libraryTracks.length; step += 1) {
-      const nextIndex = (start + direction * step + libraryTracks.length) % libraryTracks.length;
-      if (libraryTracks[nextIndex]?.playUrl) return nextIndex;
-    }
-    return -1;
   }
 
   function playNext() {
     if (!libraryTracks.length) return;
-    if (shuffle && playableTracks.length > 1) {
-      const pool = playableTracks.filter((track) => track.id !== currentTrack?.id);
-      const picked = pool[Math.floor(Math.random() * pool.length)];
-      if (!picked) return;
-      const index = libraryTracks.findIndex((track) => track.id === picked.id);
-      if (index >= 0) setCurrentIndex(index);
-      setIsPlaying(true);
-      return;
-    }
-    const nextIndex = findNextPlayableIndex(1);
-    if (nextIndex >= 0) {
-      setCurrentIndex(nextIndex);
+    const nextTrack = QueueStore.next();
+    if (nextTrack) {
       setIsPlaying(true);
     }
   }
 
   function playPrev() {
     if (!libraryTracks.length) return;
-    const prevIndex = findNextPlayableIndex(-1);
-    if (prevIndex >= 0) {
-      setCurrentIndex(prevIndex);
+    const prevTrack = QueueStore.previous();
+    if (prevTrack) {
       setIsPlaying(true);
     }
   }
@@ -230,115 +393,155 @@ export default function LibraryPage() {
   }
 
   function seekTo(value) {
-    const audio = audioRef.current;
-    if (!audio) return;
-    const maxDuration = Number.isFinite(audio.duration) && audio.duration > 0
-      ? audio.duration
-      : (duration || 0);
-    const nextTime = Math.max(0, Math.min(Number(value) || 0, maxDuration));
-    audio.currentTime = nextTime;
+    const nextTime = Math.max(0, Math.min(Number(value) || 0, duration || 0));
+    AudioManager.seek(nextTime);
     setCurrentTime(nextTime);
   }
 
-  function formatSeekLabel(seconds) {
-    if (!seconds) return '0:00';
-    return formatTime(seconds);
+  function handleVolumeChange(value) {
+    const vol = Number(value);
+    setVolume(vol);
+    AudioManager.setVolume(vol);
   }
 
-  async function loadLibrary() {
-    try {
-      const res = await authFetch('/api/player/library');
-      if (!res.ok) return;
-      const payload = await res.json();
-      const raw = Array.isArray(payload) ? payload : payload.tracks || [];
-      setLibraryTracks(raw.map((item) => normalizeLibraryTrack(item, token)).filter(Boolean));
-    } catch {
-      // noop
+  function handleShuffleToggle() {
+    const newShuffle = !shuffle;
+    QueueStore.setShuffle(newShuffle);
+  }
+
+  function handleRepeatToggle() {
+    const modes = ['off', 'one', 'all'];
+    const currentIdx = modes.indexOf(repeatMode);
+    const nextMode = modes[(currentIdx + 1) % modes.length];
+    QueueStore.setRepeatMode(nextMode);
+  }
+
+  // Обработчики для TrackList
+  function handlePlayTrack(track) {
+    const index = libraryTracks.findIndex((t) => t.id === track.id);
+    if (index >= 0) {
+      playTrackByIndex(index);
     }
   }
 
-  async function removeTrack(trackId) {
+  function handleEditTrack(track) {
+    setEditTrack(track);
+    setEditForm({
+      title: track.title || '',
+      artist: track.artist || '',
+      album: track.album || '',
+      genre: track.genre || '',
+      year: track.year ? String(track.year) : '',
+    });
+  }
+
+  async function handleRedownloadTrack(track) {
+    if (!track.canRedownload) {
+      showToast('У трека нет источника для повторного скачивания', 'error');
+      return;
+    }
     try {
-      const res = await authFetch(`/api/player/library/${trackId}`, { method: 'DELETE' });
-      if (!res.ok) {
-        showToast('Ошибка удаления', 'error');
-        return;
-      }
-      showToast('Трек удалён');
-      loadLibrary();
+      await redownloadTrackHook(track.id);
+      await loadLibrary();
     } catch {
-      // noop
+      // Ошибка уже обработана в хуке
     }
   }
 
+  async function handleRemoveTrack(track) {
+    try {
+      await removeTrack(track.id);
+      await loadLibrary();
+    } catch {
+      // Ошибка уже обработана в хуке
+    }
+  }
+
+  // Обработчики для SearchPanel
+  async function handleAddTrackFromSearch(result) {
+    const pageUrl = result.page_url || result.track_page_url || '';
+    if (!pageUrl) {
+      showToast('Не удалось получить URL трека', 'error');
+      return;
+    }
+    try {
+      await addByUrlHook(pageUrl);
+    } catch {
+      // Ошибка уже обработана в хуке
+    }
+  }
+
+  // Обработчики для загрузки файлов
   async function uploadFiles(event) {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
-
-    const formData = new FormData();
-    files.forEach((file) => formData.append('files', file));
     event.target.value = '';
 
     try {
-      const res = await authFetch('/api/player/library/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        showToast(err.detail || 'Ошибка загрузки файлов', 'error');
-        return;
-      }
-
-      const payload = await res.json().catch(() => ({}));
-      showToast(`Файлы добавлены в коллекцию: ${Number(payload.added || 0)}`, 'success');
-      loadLibrary();
+      await uploadFilesHook(files);
     } catch {
-      showToast('Ошибка загрузки файлов', 'error');
+      // Ошибка уже обработана в хуке
     }
   }
 
+  // Обработчики для модалки добавления по URL
   async function addByUrl(url) {
     try {
-      const res = await authFetch('/api/player/library', {
-        method: 'POST',
-        body: JSON.stringify({ url }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        showToast(err.detail || 'Ошибка', 'error');
-        return false;
-      }
-      showToast('Трек добавлен!', 'success');
-      loadLibrary();
+      await addByUrlHook(url);
       return true;
     } catch {
       return false;
     }
   }
 
-  async function doSearch() {
-    const q = searchQuery.trim();
-    if (!q) return;
-
-    setSearchLoading(true);
+  async function saveDownloadsFolder() {
+    if (savingDownloadsDir) return;
+    setSavingDownloadsDir(true);
     try {
-      const url = searchSource === 'youtube'
-        ? `/api/player/search/youtube?query=${encodeURIComponent(q)}`
-        : `/api/player/search/soundcloud?query=${encodeURIComponent(q)}`;
-      const res = await authFetch(url);
-      if (!res.ok) throw new Error('search');
-      const data = await res.json();
-      setSearchResults(data.tracks || []);
-    } catch {
-      setSearchResults([]);
-      showToast('Ошибка поиска', 'error');
+      await saveDownloadSettings(downloadsDirInput.trim());
     } finally {
-      setSearchLoading(false);
+      setSavingDownloadsDir(false);
     }
   }
 
+  // Обработчики для EditTrackModal
+  async function saveEditModal() {
+    if (!editTrack || editSaving) return;
+    setEditSaving(true);
+    try {
+      const metadata = {
+        title: editForm.title.trim() || null,
+        artist: editForm.artist.trim() || null,
+        album: editForm.album.trim() || null,
+        genre: editForm.genre.trim() || null,
+        year: editForm.year ? Number(editForm.year) || null : null,
+      };
+      await updateTrackMetadata(editTrack.id, metadata);
+      await loadLibrary();
+      setEditTrack(null);
+    } catch {
+      // Ошибка уже обработана в хуке
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function uploadCoverForEdited(file) {
+    if (!editTrack || !file) return;
+    setCoverUploading(true);
+    try {
+      const coverUrl = await uploadCover(editTrack.id, file);
+      await loadLibrary();
+      // Обновить превью прямо в открытой модалке
+      setEditTrack((t) => (t ? { ...t, thumbnail: coverUrl || t.thumbnail } : t));
+    } catch {
+      // Ошибка уже обработана в хуке
+    } finally {
+      setCoverUploading(false);
+    }
+  }
+
+  // Рендер состояний авторизации
   if (authState === 'checking') {
     return (
       <div className="auth-page-wrap">
@@ -430,68 +633,48 @@ export default function LibraryPage() {
             </div>
           </div>
 
-          <section className="player-hero glass glass-secondary">
-            <div className="player-hero-cover">
-              {currentTrack?.thumbnail
-                ? <img src={currentTrack.thumbnail} alt="" loading="lazy" />
-                : <div className="player-hero-cover-placeholder"><i className="fa-solid fa-music" /></div>}
+          <div className="glass glass-secondary" style={{ padding: 12, marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              <label style={{ minWidth: 170, color: 'var(--text-secondary)', fontSize: 13 }}>
+                Папка загрузки пользователя
+              </label>
+              <input
+                className="input"
+                value={downloadsDirInput}
+                onChange={(e) => setDownloadsDirInput(e.target.value)}
+                placeholder="users/1"
+                style={{ minWidth: 260, flex: '1 1 260px' }}
+              />
+              <button className="btn" onClick={saveDownloadsFolder} disabled={savingDownloadsDir}>
+                {savingDownloadsDir ? 'Сохранение...' : 'Сохранить'}
+              </button>
             </div>
-
-            <div className="player-hero-body">
-              <div className="player-kicker">Сейчас играет</div>
-              <h3 className="player-title">{currentTrack?.title || 'Выберите трек из очереди'}</h3>
-              <div className="player-artist">{currentTrack?.artist || 'Локальная библиотека'}</div>
-
-              <div className="player-progress-row">
-                <span>{formatSeekLabel(currentTime)}</span>
-                <div className="player-progress">
-                  <input
-                    type="range"
-                    min="0"
-                    max={Math.max(duration || currentTrack?.duration || 1, 1)}
-                    value={Math.min(currentTime, duration || currentTrack?.duration || 1)}
-                    onChange={(e) => seekTo(e.target.value)}
-                    disabled={!currentTrack?.playUrl}
-                  />
-                </div>
-                <span>{formatSeekLabel(duration || currentTrack?.duration || 0)}</span>
-              </div>
-
-              <div className="player-controls-row">
-                <button className="player-icon-btn" onClick={playPrev} disabled={!playableTracks.length} title="Предыдущий">
-                  <i className="fa-solid fa-backward-step" />
-                </button>
-                <button className="player-main-btn" onClick={togglePlay} disabled={!playableTracks.length} title={isPlaying ? 'Пауза' : 'Воспроизвести'}>
-                  <i className={`fa-solid ${isPlaying ? 'fa-pause' : 'fa-play'}`} />
-                </button>
-                <button className="player-icon-btn" onClick={playNext} disabled={!playableTracks.length} title="Следующий">
-                  <i className="fa-solid fa-forward-step" />
-                </button>
-                <button className={`player-chip ${shuffle ? 'active' : ''}`} onClick={() => setShuffle((v) => !v)} title="Случайный порядок">
-                  <i className="fa-solid fa-shuffle" /> Shuffle
-                </button>
-                <button className={`player-chip ${repeatOne ? 'active' : ''}`} onClick={() => setRepeatOne((v) => !v)} title="Повтор одного трека">
-                  <i className="fa-solid fa-repeat" /> Repeat
-                </button>
-              </div>
-
-              <div className="player-volume-row">
-                <i className="fa-solid fa-volume-low" />
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={volume}
-                  onChange={(e) => setVolume(Number(e.target.value))}
-                />
-                <i className="fa-solid fa-volume-high" />
-              </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
+              Фактический путь в контейнере: {downloadsPath || '—'}
             </div>
-          </section>
+          </div>
+
+          {/* Используем компонент PlayerControls */}
+          <PlayerControls
+            currentTrack={currentTrack}
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            duration={duration}
+            volume={volume}
+            shuffle={shuffle}
+            repeatMode={repeatMode}
+            onTogglePlay={togglePlay}
+            onNext={playNext}
+            onPrev={playPrev}
+            onSeek={seekTo}
+            onVolumeChange={handleVolumeChange}
+            onToggleShuffle={handleShuffleToggle}
+            onToggleRepeat={handleRepeatToggle}
+          />
 
           <input id="localFileInput" type="file" accept="audio/*" multiple style={{ display: 'none' }} onChange={uploadFiles} />
 
+          {/* Используем компонент SearchPanel */}
           <div className="search-section glass glass-secondary">
             <div className="search-bar-row">
               <input className="input" type="text" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && doSearch()} placeholder="Поиск YouTube / SoundCloud..." />
@@ -515,7 +698,7 @@ export default function LibraryPage() {
                     <div className="search-result-info">
                       <div className="search-result-title">{t.title}</div>
                       <div className="search-result-sub">{t.duration ? formatTime(t.duration) : '—'}</div>
-                      <button className="search-result-add" onClick={() => addByUrl(pageUrl)}><i className="fa-solid fa-bookmark" /> В библиотеку</button>
+                      <button className="search-result-add" onClick={() => handleAddTrackFromSearch(t)}><i className="fa-solid fa-bookmark" /> В библиотеку</button>
                     </div>
                   </div>
                 );
@@ -529,6 +712,7 @@ export default function LibraryPage() {
               <span className="badge glass-flat">{totalCount}</span>
             </div>
 
+            {/* Используем компонент TrackList */}
             <div className="track-list player-queue-list" id="libraryList">
               {!libraryTracks.length && <div className="empty-state"><i className="fa-solid fa-music" /><p>Библиотека пуста</p></div>}
               {libraryTracks.map((track, index) => (
@@ -547,17 +731,43 @@ export default function LibraryPage() {
                   </div>
                   <div className="track-actions">
                     {track.playUrl && <button className="track-act-btn" onClick={() => playTrackByIndex(index)} title="Слушать"><i className="fa-solid fa-play" /></button>}
-                    <button className="track-act-btn del" onClick={() => removeTrack(track.id)} title="Удалить"><i className="fa-solid fa-trash-can" /></button>
+                    <button className="track-act-btn" onClick={() => handleEditTrack(track)} title="Редактировать">
+                      <i className="fa-solid fa-pen" />
+                    </button>
+                    {track.canRedownload && (
+                      <button
+                        className="track-act-btn"
+                        onClick={() => handleRedownloadTrack(track)}
+                        title="Скачать заново"
+                        disabled={redownloadingId === track.id}
+                      >
+                        <i className={`fa-solid ${redownloadingId === track.id ? 'fa-spinner fa-spin' : 'fa-cloud-arrow-down'}`} />
+                      </button>
+                    )}
+                    <button className="track-act-btn del" onClick={() => handleRemoveTrack(track)} title="Удалить"><i className="fa-solid fa-trash-can" /></button>
                   </div>
                 </div>
               ))}
             </div>
           </div>
 
-          <audio ref={audioRef} preload="metadata" style={{ display: 'none' }} />
         </main>
       </div>
 
+      {/* Используем компонент EditTrackModal */}
+      <EditTrackModal
+        track={editTrack}
+        isOpen={!!editTrack}
+        onClose={() => !editSaving && !coverUploading && setEditTrack(null)}
+        onSave={saveEditModal}
+        onUploadCover={uploadCoverForEdited}
+        editForm={editForm}
+        onFormChange={setEditForm}
+        isSaving={editSaving}
+        isUploadingCover={coverUploading}
+      />
+
+      {/* Модалка добавления по URL */}
       {showAddUrlModal && (
         <div style={{ display: 'flex', position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(4px)', zIndex: 1000, alignItems: 'center', justifyContent: 'center' }}>
           <div className="glass glass-primary" style={{ width: '100%', maxWidth: 420, padding: 32, margin: 20 }}>

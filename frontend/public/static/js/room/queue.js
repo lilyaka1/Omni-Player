@@ -8,6 +8,24 @@ const QueueModule = (function () {
 
   let _queue = [];
 
+  function normalizeTrackMeta(track) {
+    const next = { ...(track || {}) };
+    const title = String(next.title || '').trim();
+    const artist = String(next.artist || '').trim();
+    if (artist && artist.toLowerCase() !== 'unknown' && artist !== '—' && artist !== '-') return next;
+    for (const sep of [' — ', ' – ', ' - ']) {
+      if (!title.includes(sep)) continue;
+      const [left, ...rest] = title.split(sep);
+      const right = rest.join(sep).trim();
+      if (left.trim() && right) {
+        next.artist = left.trim();
+        next.title = right;
+        return next;
+      }
+    }
+    return next;
+  }
+
   function trace(step, payload) {
     try {
       if (typeof payload === 'undefined') {
@@ -21,7 +39,7 @@ const QueueModule = (function () {
   // ---- Рендер ----
 
   function setQueue(tracks) {
-    _queue = tracks || [];
+    _queue = (tracks || []).map(normalizeTrackMeta);
     GLOBAL.queue = _queue;
     render();
   }
@@ -101,7 +119,7 @@ const QueueModule = (function () {
       // stream_url can be empty — backend will prefetch/refresh it asynchronously.
       const source = detectSource(url);
       const sourceTrackId = extractSourceTrackId(url);
-      const payload = {
+      const payload = normalizeTrackMeta({
         source,
         source_track_id: sourceTrackId,
         title: inferTitleFromUrl(url, sourceTrackId),
@@ -110,7 +128,7 @@ const QueueModule = (function () {
         stream_url: '',
         thumbnail: null,
         genre: null,
-      };
+      });
 
       trace('queue_add_request', payload);
 
