@@ -1,303 +1,186 @@
-"""
-Stream routing - handle audio streaming endpoints
-"""
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
-from app.core.dependencies import get_current_user
-from app.database.models import Room
-from app.database.models import RoomTrack
+from app.database.models import Room, RoomTrack
 from app.database.session import get_db
-from app.room.queue import get_room_state
-from app.room.manager import room_manager
-from app.database.session import SessionLocal
-from app.room.providers.soundcloud import soundcloud_client
 from pathlib import Path
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
+# project root — stream router читает файлы строго относительно него
+BASE_DIR = Path(__file__).resolve().parents[3]
 
-def _get_download_status(stream_url: str) -> str:
-    value = str(stream_url or '').strip()
-    if value and Path(value).is_file():
-        return 'ready'
-    return 'downloading'
-
-@router.get("/room/{room_id}/status")
-async def get_stream_status(room_id: int, db: Session = Depends(get_db)):
-    """Get room broadcast status"""
-    room = db.query(Room).filter(Room.id == room_id).first()
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Check if broadcast is actually running
-    is_live = room_manager.is_live(room_id)
-    bc = room_manager.broadcasts.get(room_id)
-    
-    response = {
-        "live": is_live,
-        "active": is_live,
-        "is_active": is_live,
-        "room_id": room_id,
-    }
-    
-    # Add current track info if available
-    if bc and bc.current_track_title:
-        response["current_track"] = bc.current_track_title
-    
-    # Add listener count
-    if bc:
-        response["listeners"] = len(bc.listeners)
-    
-    return response
 
 @router.get("/room/{room_id}/stream")
-async def get_room_stream(room_id: int, db: Session = Depends(get_db)):
+async def stream_endpoint(room_id: int, db: Session = Depends(get_db)):
     """
-    Stream live broadcast for a room.
-    Returns HTTP audio stream from FFmpeg broadcast.
+    Тупой файл-читатель.
+    INPUT: room.now_playing_track_id
+    OUTPUT: FileResponse | StreamingResponse | 404
     """
-    from fastapi.responses import StreamingResponse
-    import time
-    
-    print(f"🎧 [STREAM] Room {room_id}: New connection request")
-    
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
-        print(f"❌ [STREAM] Room {room_id}: Not found in database")
         raise HTTPException(status_code=404, detail="Room not found")
-    
-    print(f"📊 [STREAM] Room {room_id}: DB state - is_playing={room.is_playing}, current_track_id={room.now_playing_track_id}")
 
-    # If playback has just been started, the websocket handler can mark the room
-    # as playing before the broadcast task finishes booting. Wait a short grace
-    # window for the live broadcast to appear instead of failing immediately.
-    if room.is_playing and not room_manager.is_live(room_id):
-        import asyncio
+    if room.now_playing_track_id is None:
+        raise HTTPException(status_code=404, detail="No track playing")
 
-        for _ in range(20):
-            await asyncio.sleep(0.25)
-            if room_manager.is_live(room_id):
-                break
-    
-    # Check if broadcast is running
-    is_live = room_manager.is_live(room_id)
-    print(f"📡 [STREAM] Room {room_id}: Broadcast is_live={is_live}")
-    
-    if not is_live:
-        print(f"⚠️ [STREAM] Room {room_id}: Broadcast not started, returning 503")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Broadcast not started yet"
+    track = db.query(RoomTrack).filter(RoomTrack.id == room.now_playing_track_id).first()
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    # Prefer TrackAsset.local_path for serving audio. Only serve assets in 'ready' state.
+    # Try Track/TrackAsset first (case-insensitive source match)
+    from app.database.models import Track, TrackAsset
+    from sqlalchemy import func
+
+    track_model = db.query(Track).filter(
+        func.lower(Track.source) == func.lower(track.source),
+        Track.source_track_id == track.source_track_id
+    ).first()
+
+    file_path = None
+
+    if track_model:
+        asset = (
+            db.query(TrackAsset)
+            .filter(TrackAsset.track_id == track_model.id, TrackAsset.status == 'ready')
+            .order_by(TrackAsset.updated_at.desc())
+            .first()
         )
-    
-    # Get broadcast state
-    bc = room_manager.broadcasts.get(room_id)
-    if not bc or not bc.running:
-        print(f"⚠️ [STREAM] Room {room_id}: Broadcast state invalid (bc={bc}, running={bc.running if bc else 'N/A'})")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Broadcast not available"
-        )
-    
-    print(f"✅ [STREAM] Room {room_id}: Starting stream (current_track='{bc.current_track_title}', listeners={len(bc.listeners)})")
-    
-    # Stream from broadcast buffer
-    start_time = time.time()
-    chunks_sent = 0
-    bytes_sent = 0
-    
-    async def stream_generator():
-        nonlocal chunks_sent, bytes_sent
-        try:
-            print(f"🎵 [STREAM] Room {room_id}: Generator started, subscribing to broadcast")
-            async for chunk in bc.subscribe():
-                yield chunk
-                chunks_sent += 1
-                bytes_sent += len(chunk)
-                
-                # Log every 100 chunks (~50 seconds at 128kbps)
-                if chunks_sent % 100 == 0:
-                    elapsed = time.time() - start_time
-                    print(f"📈 [STREAM] Room {room_id}: Sent {chunks_sent} chunks ({bytes_sent/1024:.1f}KB) in {elapsed:.1f}s")
-        except Exception as e:
-            elapsed = time.time() - start_time
-            print(f"❌ [STREAM] Room {room_id}: Error after {elapsed:.1f}s, {chunks_sent} chunks: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            elapsed = time.time() - start_time
-            print(f"🔌 [STREAM] Room {room_id}: Connection closed after {elapsed:.1f}s ({chunks_sent} chunks, {bytes_sent/1024:.1f}KB)")
-    
-    return StreamingResponse(
-        stream_generator(),
+        if asset and asset.local_path:
+            fp = Path(asset.local_path)
+            if fp.is_file():
+                file_path = fp
+
+    # Fallback: use RoomTrack.stream_url directly (SoundCloud CDN URL or local path)
+    if not file_path and track.stream_url:
+        if track.stream_url.startswith('http://') or track.stream_url.startswith('https://'):
+            # Remote URL — proxy via httpx StreamingResponse
+            import httpx
+            try:
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = httpx.get(track.stream_url, headers=headers, follow_redirects=True, timeout=10.0)
+                r.raise_for_status()
+                return StreamingResponse(
+                    r.iter_bytes(chunk_size=65536),
+                    media_type=r.headers.get("content-type", "audio/mpeg"),
+                    headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+                )
+            except Exception as e:
+                print(f"❌ Stream proxy error: {e}")
+                raise HTTPException(status_code=502, detail="Upstream stream unavailable")
+        else:
+            fp = Path(track.stream_url)
+            if fp.is_file():
+                file_path = fp
+
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Asset not ready")
+
+    return FileResponse(
+        str(file_path),
         media_type="audio/mpeg",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-            "X-Content-Type-Options": "nosniff",
-        }
+        headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
     )
+
+
+@router.get("/room/{room_id}/status")
+async def room_status(room_id: int, db: Session = Depends(get_db)):
+    """
+    Room state endpoint - returns current track info.
+    """
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    if room.now_playing_track_id is None:
+        return JSONResponse({"current_track": None, "room_id": room_id})
+
+    track = db.query(RoomTrack).filter(RoomTrack.id == room.now_playing_track_id).first()
+    if not track:
+        return JSONResponse({"current_track": None, "room_id": room_id})
+
+    return JSONResponse({
+        "current_track": {
+            "id": track.id,
+            "title": track.title,
+            "artist": track.artist,
+            "duration": track.duration,
+            "thumbnail": track.thumbnail or "",
+            "stream_url": track.stream_url or "",
+        },
+        "room_id": room_id,
+    })
+
+
+@router.get("/queue/{room_id}")
+async def room_queue(room_id: int, db: Session = Depends(get_db)):
+    """
+    Queue endpoint - returns all tracks in room.
+    Frontend expects: { tracks: [...] } or just [...]
+    """
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    tracks = db.query(RoomTrack).filter(RoomTrack.room_id == room_id).order_by(RoomTrack.order).all()
+
+    track_list = [
+        {
+            "id": t.id,
+            "title": t.title,
+            "artist": t.artist,
+            "duration": t.duration,
+            "thumbnail": t.thumbnail or "",
+            "order": t.order,
+            "stream_url": t.stream_url or "",
+            "source": t.source or "youtube",
+            "source_track_id": t.source_track_id or "",
+            "genre": t.genre or "",
+        }
+        for t in tracks
+    ]
+    
+    # Return format that frontend expects: { tracks: [...] }
+    return JSONResponse({"tracks": track_list})
 
 
 @router.post("/room/{room_id}/start")
-async def start_room_stream(room_id: int, db: Session = Depends(get_db)):
-    """Legacy compatibility endpoint: start room broadcast."""
+async def room_start(room_id: int, db: Session = Depends(get_db)):
+    """Start playback - stub for frontend compatibility."""
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-
-    if room_manager.is_live(room_id):
-        return {"success": True, "live": True}
-
-    await room_manager.start_room(room_id, SessionLocal, soundcloud_client)
-    return {"success": True, "live": True}
+    return JSONResponse({"ok": True, "room_id": room_id})
 
 
 @router.post("/room/{room_id}/stop")
-async def stop_room_stream(
-    room_id: int,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user),
-):
-    """Stop room broadcast — only admin/owner/dj."""
-    if not current_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
+async def room_stop(room_id: int, db: Session = Depends(get_db)):
+    """Stop playback - stub for frontend compatibility."""
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+    return JSONResponse({"ok": True, "room_id": room_id})
 
-    user_role = current_user.role if hasattr(current_user, "role") else "user"
-    is_owner = getattr(room, "creator_id", None) == current_user.id
-    if user_role not in ("admin", "dj") and not is_owner:
-        raise HTTPException(status_code=403, detail="Forbidden")
 
-    if not room_manager.is_live(room_id):
-        return {"success": True, "live": False}
-
-    await room_manager.stop_room(room_id)
-    return {"success": True, "live": False}
-
-@router.get("/room/{room_id}/hls/playlist.m3u8")
-async def get_hls_playlist(room_id: int, db: Session = Depends(get_db)):
-    """
-    Get HLS playlist for room.
-    Returns .m3u8 playlist file for HLS streaming.
-    """
-    from app.room.hls import hls_manager
+@router.get("/search/soundcloud")
+async def search_soundcloud(query: str = None, limit: int = 20):
+    """Search SoundCloud tracks - proxy to tracks service."""
+    from app.domains.tracks.service import TracksService
+    from app.database.session import SessionLocal
+    from fastapi import Query as FastAPIQuery
     
-    print(f"📺 [HLS] Room {room_id}: Playlist request")
+    if not query or not query.strip():
+        return JSONResponse({"tracks": []})
     
-    room = db.query(Room).filter(Room.id == room_id).first()
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Check if HLS transcoding is running
-    if not hls_manager.is_transcoding(room_id):
-        print(f"⚠️ [HLS] Room {room_id}: HLS not started")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="HLS transcoding not started"
-        )
-    
-    playlist_path = hls_manager.get_playlist_path(room_id)
-    if not playlist_path or not Path(playlist_path).exists():
-        print(f"❌ [HLS] Room {room_id}: Playlist not found")
-        raise HTTPException(status_code=404, detail="Playlist not found")
-    
-    print(f"✅ [HLS] Room {room_id}: Serving playlist")
-    return FileResponse(
-        playlist_path,
-        media_type="application/vnd.apple.mpegurl",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        }
-    )
-
-@router.get("/room/{room_id}/hls/{segment_name}")
-async def get_hls_segment(room_id: int, segment_name: str, db: Session = Depends(get_db)):
-    """
-    Get HLS segment file.
-    Returns .ts segment file for HLS streaming.
-    """
-    from app.room.hls import hls_manager
-    
-    # Validate segment name (security)
-    if not segment_name.endswith('.ts') or '/' in segment_name or '\\' in segment_name:
-        raise HTTPException(status_code=400, detail="Invalid segment name")
-    
-    room = db.query(Room).filter(Room.id == room_id).first()
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    # Get transcoder
-    transcoder = hls_manager.transcoders.get(room_id)
-    if not transcoder or not transcoder.output_dir:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="HLS transcoding not available"
-        )
-    
-    segment_path = transcoder.output_dir / segment_name
-    if not segment_path.exists():
-        raise HTTPException(status_code=404, detail="Segment not found")
-    
-    return FileResponse(
-        str(segment_path),
-        media_type="video/mp2t",
-        headers={
-            "Cache-Control": "public, max-age=31536000",  # Сегменты можно кэшировать
-        }
-    )
-
-@router.get("/queue/{room_id}")
-async def get_room_queue(room_id: int, db: Session = Depends(get_db)):
-    """Get room track queue"""
-    room = db.query(Room).filter(Room.id == room_id).first()
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    
-    room_tracks = (
-        db.query(RoomTrack)
-        .filter(RoomTrack.room_id == room_id)
-        .order_by(RoomTrack.order)
-        .all()
-    )
-    
-    tracks = []
-    for rt in room_tracks:
-        tracks.append({
-            "id": rt.id,
-            "title": rt.title,
-            "artist": rt.artist,
-            "duration": rt.duration,
-            "stream_url": rt.stream_url,
-            "download_status": _get_download_status(rt.stream_url),
-            "thumbnail": rt.thumbnail or "",
-            "genre": rt.genre or "",
-            "added_by_id": rt.added_by_id,
-        })
-
-    if not tracks:
-        state = get_room_state(db, room) or {}
-        current_track = state.get("current_track")
-        if current_track:
-            tracks = [
-                {
-                    "id": current_track.get("id"),
-                    "title": current_track.get("title"),
-                    "artist": current_track.get("artist"),
-                    "duration": current_track.get("duration"),
-                    "stream_url": current_track.get("stream_url") or "",
-                    "download_status": _get_download_status(current_track.get("stream_url") or ""),
-                    "thumbnail": current_track.get("thumbnail") or "",
-                    "genre": current_track.get("genre") or "",
-                    "added_by_id": None,
-                }
-            ]
-    
-    return {"tracks": tracks}
+    db = SessionLocal()
+    try:
+        service = TracksService(db)
+        tracks = await service.search_soundcloud(query.strip(), limit=min(limit, 50))
+        return JSONResponse({"tracks": tracks})
+    except Exception as e:
+        print(f"❌ Search error: {e}")
+        return JSONResponse({"tracks": [], "error": str(e)}, status_code=500)
+    finally:
+        db.close()

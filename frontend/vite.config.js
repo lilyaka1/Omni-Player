@@ -1,6 +1,10 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+// Explicitly point to the backend that is running on port 8000.
+const apiTarget = 'http://0.0.0.0:8000';
+const wsTarget = apiTarget.replace(/^http/, 'ws');
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -10,35 +14,13 @@ export default defineConfig({
     hmr: false,
     middlewareMode: false,
     proxy: {
-      '/api': {
-        target: 'http://backend:8000',
-        rewrite: (path) => path,
-      },
-      '/auth': {
-        target: 'http://backend:8000',
-        rewrite: (path) => path,
-      },
-      '/rooms': {
-        target: 'http://backend:8000',
-        rewrite: (path) => path,
-      },
-      '/ws': {
-        target: 'ws://backend:8000',
-        ws: true,
-        rewrite: (path) => path,
-      },
-      '/stream': {
-        target: 'http://backend:8000',
-        rewrite: (path) => path,
-      },
-      '/admin': {
-        target: 'http://backend:8000',
-        rewrite: (path) => path,
-      },
-      '/health': {
-        target: 'http://backend:8000',
-        rewrite: (path) => path,
-      }
+      '/api': { target: apiTarget, rewrite: (path) => path },
+      '/auth': { target: apiTarget, rewrite: (path) => path },
+      '/rooms': { target: apiTarget, rewrite: (path) => path },
+      '/ws': { target: wsTarget, ws: true, rewrite: (path) => path },
+      '/stream': { target: apiTarget, rewrite: (path) => path },
+      '/admin': { target: apiTarget, rewrite: (path) => path },
+      '/health': { target: apiTarget, rewrite: (path) => path },
     }
   }
 });

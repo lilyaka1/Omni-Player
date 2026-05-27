@@ -1,4 +1,6 @@
 import { formatTime } from '../utils/format';
+import TrackStatus from './TrackStatus';
+import useTrackStatus from '../hooks/useTrackStatus';
 
 export default function PlayerControls({
   currentTrack,
@@ -21,6 +23,10 @@ export default function PlayerControls({
     return formatTime(seconds);
   };
 
+  const { status } = useTrackStatus(currentTrack?.id);
+
+  const isReady = status === 'ready';
+
   return (
     <section className="player-hero glass glass-secondary">
       <div className="player-hero-cover">
@@ -33,6 +39,11 @@ export default function PlayerControls({
         <div className="player-kicker">Сейчас играет</div>
         <h3 className="player-title">{currentTrack?.title || 'Выберите трек из очереди'}</h3>
         <div className="player-artist">{currentTrack?.artist || 'Локальная библиотека'}</div>
+        {currentTrack?.id && (
+          <div style={{ marginTop: 6 }}>
+            <TrackStatus trackId={currentTrack.id} initialStatus={currentTrack?.processing_status} initialProgress={currentTrack?.processing_progress} />
+          </div>
+        )}
 
         <div className="player-progress-row">
           <span>{formatSeekLabel(currentTime)}</span>
@@ -43,7 +54,7 @@ export default function PlayerControls({
               max={Math.max(duration || currentTrack?.duration || 1, 1)}
               value={Math.min(currentTime, duration || currentTrack?.duration || 1)}
               onChange={(e) => onSeek(e.target.value)}
-              disabled={!currentTrack?.playUrl}
+              disabled={!currentTrack?.playUrl || !isReady}
             />
           </div>
           <span>{formatSeekLabel(duration || currentTrack?.duration || 0)}</span>
@@ -61,7 +72,7 @@ export default function PlayerControls({
           <button 
             className="player-main-btn" 
             onClick={onTogglePlay} 
-            disabled={!currentTrack} 
+            disabled={!currentTrack || !isReady} 
             title={isPlaying ? 'Пауза' : 'Воспроизвести'}
           >
             <i className={`fa-solid ${isPlaying ? 'fa-pause' : 'fa-play'}`} />

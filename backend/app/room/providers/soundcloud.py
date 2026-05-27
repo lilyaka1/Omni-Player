@@ -257,6 +257,40 @@ class SoundCloudClient:
             traceback.print_exc()
             return None
 
+    async def get_raw_track_info(self, track_url: str) -> Optional[Dict]:
+        """
+        Return raw yt-dlp detailed info dict for the given SoundCloud track URL
+        (metadata only, no download).
+        """
+        import asyncio
+        try:
+            if not track_url:
+                return None
+
+            track_url = str(track_url).strip()
+            if track_url.isdigit():
+                track_url = f"https://api.soundcloud.com/tracks/{track_url}"
+            elif 'soundcloud.com' not in track_url:
+                return None
+
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+                'socket_timeout': 15,
+                'no_color': True,
+            }
+
+            def _extract_raw():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(track_url, download=False)
+
+            detailed_info = await asyncio.to_thread(_extract_raw)
+            return detailed_info
+        except Exception as e:
+            print(f"❌ get_raw_track_info failed: {e}")
+            return None
+
     async def download_to_file(self, track_url: str, output_dir: Path,
                                 filename_stem: str) -> Optional[Dict]:
         """

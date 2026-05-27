@@ -2,6 +2,7 @@
 WebSocket handlers.
 Правило: asyncio.to_thread() создаёт СВОЮ SessionLocal().
 SQLAlchemy Session не thread-safe.
+MVP RADIO-MODE: now_playing_track_id — единственный источник истины.
 """
 import asyncio
 import json
@@ -25,7 +26,7 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
     print(f"Токен: {'да' if token else 'НЕТ'}")
     print(f"{'='*60}")
 
-    await websocket.accept()  # ПЕРВЫМ — до любых DB-запросов
+    await websocket.accept()
 
     async def _close(code: int, reason: str):
         try:
@@ -79,7 +80,6 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                 "username": user.username,
                 "user_role": user_role,
                 "room_creator_id": room.creator_id,
-                "playback_started_at": room.playback_started_at.isoformat() if room.playback_started_at else None,
                 "room_state": room_state,
             }
         finally:
@@ -101,7 +101,6 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
         return None
 
     user_role = auth["user_role"]
-    room_state = auth["room_state"]
 
     class _UserProxy:
         def __init__(self, d):
@@ -112,27 +111,88 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
     user = _UserProxy(auth)
 
     await manager.connect(websocket, room_id, user_id=user.id, user_role=user_role, skip_accept=True)
+    print(f"🔌 WS connected: user={user.id} room={room_id} role={user_role}")
 
+    # ── FIX #1 + #2: Bootstrap playback on join (this is the missing link) ──────
     try:
-        from app.room.manager import room_manager
-        is_playing_live = room_manager.is_live(room_id)
-    except Exception:
-        is_playing_live = room_state.get("is_playing", False)
+        from app.playback.bootstrap import join_room_and_start
+        print(f"🚀 [WS] Calling join_room_and_start for room {room_id}...")
+        result = await join_room_and_start(room_id, user.id)
+        print(f"🚀 [WS] join_room_and_start result: ok={result.ok} now_playing={result.now_playing_track_id} actions={result.actions} errors={result.errors}")
+    except Exception as e:
+        print(f"❌ [WS] join_room_and_start failed: {e}")
+        import traceback; traceback.print_exc()
 
-    if room_state.get("current_track"):
-        manager.room_states[room_id]["current_track"] = room_state["current_track"]
-        manager.room_states[room_id]["position"] = room_state.get("position", 0)
-        manager.room_states[room_id]["is_playing"] = is_playing_live
-        manager.room_states[room_id]["playback_started_at"] = auth["playback_started_at"]
-        manager.room_states[room_id]["server_time"] = room_state.get("server_time")
-    else:
-        manager.room_states[room_id]["is_playing"] = is_playing_live
+    # ── FIX #3: Send FULL snapshot (queue + now_playing) on join ─────────────────
+    def _build_snapshot():
+        _db = SessionLocal()
+        try:
+            room = _db.query(Room).filter(Room.id == room_id).first()
+            if not room:
+                return {}
 
-    state_with_role = {**manager.room_states[room_id], "user_role": str(user_role)}
-    await websocket.send_json({"type": "room_state", "data": state_with_role})
+            queue = (
+                _db.query(RoomTrack)
+                .filter(RoomTrack.room_id == room_id)
+                .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
+                .all()
+            )
+            now_playing = None
+            if room.now_playing_track_id:
+                now_playing = _db.query(RoomTrack).filter(
+                    RoomTrack.id == room.now_playing_track_id
+                ).first()
+
+            return {
+                "current_track": {
+                    "id": now_playing.id,
+                    "title": now_playing.title,
+                    "artist": now_playing.artist,
+                    "duration": now_playing.duration or 0,
+                    "thumbnail": now_playing.thumbnail or "",
+                    "genre": now_playing.genre or "",
+                } if now_playing else None,
+                "queue": [
+                    {
+                        "id": t.id,
+                        "title": t.title,
+                        "artist": t.artist,
+                        "duration": t.duration or 0,
+                        "thumbnail": t.thumbnail or "",
+                        "genre": t.genre or "",
+                        "order": t.order,
+                    }
+                    for t in queue
+                ],
+                "is_playing": bool(room.now_playing_track_id),
+                "playback_started_at": (
+                    room.playback_started_at.isoformat() if room.playback_started_at else None
+                ),
+            }
+        finally:
+            _db.close()
+
+    snapshot = await asyncio.to_thread(_build_snapshot)
+
+    # Send full snapshot so frontend sees queue + current track immediately
+    payload = manager._wrap_event("room_state", {
+        **snapshot,
+        "user_role": str(user_role),
+        "queue": snapshot.get("queue", []),
+    })
+    await websocket.send_json(payload)
+    print(f"📡 [WS] snapshot sent: track={snapshot.get('current_track', {}).get('title') if snapshot.get('current_track') else 'NONE'}, queue_size={len(snapshot.get('queue', []))}")
+
+    # Also send track_change in correct format so player.js handler works
+    if snapshot.get("current_track"):
+        await websocket.send_json(manager._wrap_event("track_change", {
+            "current_track": snapshot["current_track"],
+            "track": snapshot["current_track"],
+        }))
+        print(f"🎵 [WS] Sent track_change → '{snapshot['current_track']['title']}'")
 
     user_count = len(manager.active_connections.get(room_id, []))
-    await manager.broadcast(room_id, json.dumps({"type": "user_count", "count": user_count}))
+    await manager.broadcast_event(room_id, 'user_count', {"count": user_count})
     return user, room_id, user_role
 
 
@@ -151,13 +211,12 @@ async def handle_chat(room_id: int, user, data: dict) -> None:
             _db.close()
 
     result = await asyncio.to_thread(_save)
-    await manager.broadcast(room_id, json.dumps({
-        "type": "chat",
+    await manager.broadcast_event(room_id, 'chat', {
         "id": result["id"],
         "user": user.username or user.email,
         "content": data.get("content", ""),
         "timestamp": result["timestamp"],
-    }))
+    })
 
 
 # -- Track change --
@@ -183,7 +242,6 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
 
                     if not track:
                         raw_stream_url = track_data.get("stream_url") or track_data.get("url", "")
-                        # ── Resolve local file → /api/player/audio/{id} ──
                         resolved_url = raw_stream_url
                         if raw_stream_url == "pending://local-upload" or raw_stream_url.startswith("local-upload://"):
                             src_id = source_track_id
@@ -213,7 +271,10 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
                             title=title,
                             artist=artist,
                             duration=track_data.get("duration", 0),
-                            stream_url=resolved_url,
+                            # NO-OP: avoid persisting resolved URL that could make
+                            # the track appear playable. Playability is controlled
+                            # by TrackAsset.status == 'ready'.
+                            stream_url="",
                             thumbnail=track_data.get("thumbnail", ""),
                             genre=track_data.get("genre", ""),
                             order=max_order + 1,
@@ -268,16 +329,27 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
             except Exception as e:
                 print(f"prefetch error: {e}")
 
-        track_dict = {k: result[k] for k in ("id", "title", "artist", "duration", "thumbnail", "genre")}
+        # Fetch real started_at from Room for accurate timeline
+        def _get_started_at():
+            _db = SessionLocal()
+            try:
+                room = _db.query(Room).filter(Room.id == room_id).first()
+                if room and room.playback_started_at:
+                    return room.playback_started_at.isoformat()
+                return None
+            finally:
+                _db.close()
 
-        if result["track_count"] == 1:
-            new_state = manager.set_room_state(room_id, track=track_dict, is_playing=True)
-            await manager.broadcast(room_id, json.dumps({"type": "track_change", "data": new_state}))
-        else:
-            await manager.broadcast(room_id, json.dumps({
-                "type": "queue_updated",
-                "data": {"track_added": track_dict, "queue_position": result["track_count"]},
-            }))
+        started_at = await asyncio.to_thread(_get_started_at)
+
+        track_dict = {k: result[k] for k in ("id", "title", "artist", "duration", "thumbnail", "genre")}
+        track_dict["started_at"] = started_at
+
+        # ── MVP: теперь только track_change (broadcast единого потока).
+        await manager.broadcast_event(room_id, 'track_changed', {
+            "track": track_dict,
+            "playback_started_at": started_at,
+        })
 
     except Exception as exc:
         print(f"track_change error: {exc}")
@@ -288,12 +360,14 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
 # -- Playback control --
 
 async def handle_playback_control(room_id: int, data: dict) -> None:
-    """Каждый DB-вызов — собственная сессия в своём потоке."""
+    """MVP radio-mode playback control — только now_playing_track_id в БД.
+    Никаких is_playing / is_live / broadcast state.
+    """
     from datetime import datetime
 
     action = data.get("action")
     track_id = data.get("track_id")
-    print(f"🎮 [PLAYBACK] Room {room_id}: action={action}, track_id={track_id}")
+    print(f"🎮 [PLAYBACK] MVP radio-mode: room={room_id} action={action}")
 
     def _db_play():
         _db = SessionLocal()
@@ -301,33 +375,14 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
             room = _db.query(Room).filter(Room.id == room_id).first()
             if not room:
                 return {"ok": False, "reason": "room_not_found"}
-            if track_id:
-                room.now_playing_track_id = track_id
-            elif not room.now_playing_track_id:
-                first = (
-                    _db.query(RoomTrack)
-                    .filter(RoomTrack.room_id == room_id)
-                    .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-                    .first()
-                )
-                if first:
-                    room.now_playing_track_id = first.id
-                else:
-                    return {"ok": False, "reason": "no_tracks"}
-            room.playback_started_at = datetime.utcnow()
-            room.is_playing = True
-            _db.commit()
-            return {"ok": True, "started_at": room.playback_started_at.isoformat()}
-        finally:
-            _db.close()
-
-    def _db_pause():
-        _db = SessionLocal()
-        try:
-            room = _db.query(Room).filter(Room.id == room_id).first()
-            if room:
-                room.is_playing = False
-                _db.commit()
+            try:
+                from app.playback.controller import start_playback
+                started_id = start_playback(room_id)
+                if not started_id:
+                    return {"ok": False, "reason": "no_ready_track"}
+                return {"ok": True, "now_playing_track_id": started_id}
+            except Exception:
+                return {"ok": False, "reason": "controller_error"}
         finally:
             _db.close()
 
@@ -339,97 +394,54 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
         finally:
             _db.close()
 
-    is_playing = False
-    started_at = None
-
     if action == "next":
         try:
-            from app.room.queue import advance_track
-            ok = await advance_track(room_id, SessionLocal)
-            if ok:
-                try:
-                    from app.room.manager import room_manager
-                    bc = room_manager.broadcasts.get(room_id)
-                    if bc:
-                        bc.skip_event.set()
-                        bc.current_track_id = None
-                except Exception as exc:
-                    print(f"⚠️ [PLAYBACK] Room {room_id}: next skip signal failed: {exc}")
-                return
+            from app.playback.controller import advance_playback
+            result = await asyncio.to_thread(advance_playback, room_id)
+            print(f"➡️ [PLAYBACK] Room {room_id}: advance_track result={result}")
         except Exception as exc:
             print(f"❌ [PLAYBACK] Room {room_id}: next error: {exc}")
-        is_playing = False
+        # Rebuild fresh state after advance
+        room_state = await asyncio.to_thread(_db_state)
+        ct = room_state.get("current_track")
+        await manager.broadcast_event(room_id, 'room_state', {"current_track": ct, "is_playing": bool(ct)})
+        if ct:
+            await manager.broadcast_event(room_id, 'track_change', {"current_track": ct, "track": ct})
+            print(f"🎵 [PLAYBACK] Broadcast track_change for '{ct.get('title')}'")
+        return
 
     elif action == "play":
         res = await asyncio.to_thread(_db_play)
         if not res["ok"]:
             print(f"❌ [PLAYBACK] Room {room_id}: play failed - {res['reason']}")
             return
-        started_at = res["started_at"]
-        is_playing = True
-        print(f"✅ [PLAYBACK] Room {room_id}: DB updated, started_at={started_at}")
-        
-        try:
-            from app.room.manager import room_manager
-            from app.room.providers.soundcloud import soundcloud_client
-            
-            if not room_manager.is_live(room_id):
-                print(f"🚀 [PLAYBACK] Room {room_id}: Starting new broadcast")
-                asyncio.create_task(room_manager.start_room(room_id, SessionLocal, soundcloud_client))
-            else:
-                print(f"⏭️ [PLAYBACK] Room {room_id}: Broadcast already running, triggering skip")
-                bc = room_manager.broadcasts.get(room_id)
-                if bc:
-                    bc.skip_event.set()
-                    bc.current_track_id = None
-        except Exception as exc:
-            print(f"❌ [PLAYBACK] Room {room_id}: broadcast error: {exc}")
-            import traceback
-            traceback.print_exc()
+        print(f"✅ [PLAYBACK] MVP: now_playing_track_id={res['now_playing_track_id']}")
 
     elif action == "pause":
-        print(f"⏸️ [PLAYBACK] Room {room_id}: Pausing broadcast")
-        await asyncio.to_thread(_db_pause)
+        # В radio mode pause не нужен — фронт управляет только стримом.
+        # Сброс playback_started_at чтобы stream endpoint дал 404.
         try:
-            from app.room.manager import room_manager
-            if room_manager.is_live(room_id):
-                print(f"🛑 [PLAYBACK] Room {room_id}: Stopping broadcast")
-                await room_manager.stop_room(room_id)
-            else:
-                print(f"ℹ️ [PLAYBACK] Room {room_id}: Broadcast already stopped")
-        except Exception as exc:
-            print(f"❌ [PLAYBACK] Room {room_id}: stop error: {exc}")
-            import traceback
-            traceback.print_exc()
+            from app.playback.controller import stop_playback
+            await asyncio.to_thread(stop_playback, room_id)
+        except Exception:
+            pass
+        await manager.broadcast_event(room_id, 'room_state', {"current_track": None})
+        return
 
     room_state = await asyncio.to_thread(_db_state)
-    update_data = {
-        "is_playing": is_playing,
-        "position": room_state.get("position"),
-        "playback_started_at": started_at or room_state.get("playback_started_at"),
-        "server_time": room_state.get("server_time"),
-    }
-    # Обновляем current_track чтобы слушатели получили метаданные нового трека
-    if room_state.get("current_track"):
-        update_data["current_track"] = room_state["current_track"]
-    manager.room_states[room_id].update(update_data)
-    await manager.broadcast(room_id, json.dumps({"type": "room_state", "data": manager.room_states[room_id]}))
+    await manager.broadcast_event(room_id, 'room_state', {"current_track": room_state.get("current_track")})
 
-    # Явно broadcast track_changed после play — RoomPage слушает именно этот тип события
-    if is_playing and room_state.get("current_track"):
+    if room_state.get("current_track"):
+        ct = room_state["current_track"]
         track_dict = {
-            "id": room_state["current_track"].get("id"),
-            "title": room_state["current_track"].get("title", ""),
-            "artist": room_state["current_track"].get("artist", ""),
-            "duration": room_state["current_track"].get("duration") or 0,
-            "thumbnail": room_state["current_track"].get("thumbnail") or "",
-            "genre": room_state["current_track"].get("genre") or "",
-            "started_at": int(time.time()),
+            "id": ct.get("id"),
+            "title": ct.get("title", ""),
+            "artist": ct.get("artist", ""),
+            "duration": ct.get("duration") or 0,
+            "thumbnail": ct.get("thumbnail") or "",
+            "genre": ct.get("genre") or "",
         }
-        await manager.broadcast(room_id, json.dumps({
-            "type": "track_changed",
-            "track": track_dict,
-        }))
+        await manager.broadcast_event(room_id, 'track_changed', {"track": track_dict})
 
 
 # -- Reorder queue --
@@ -463,7 +475,6 @@ async def handle_reorder_queue(room_id: int, data: dict) -> None:
     if not ok:
         return
 
-    # Fetch updated queue for broadcast
     def _db_queue():
         _db = SessionLocal()
         try:
@@ -474,21 +485,12 @@ async def handle_reorder_queue(room_id: int, data: dict) -> None:
                 .all()
             )
             return [
-                {
-                    "id": t.id,
-                    "title": t.title,
-                    "artist": t.artist,
-                    "duration": t.duration or 0,
-                    "thumbnail": t.thumbnail or "",
-                    "genre": t.genre or "",
-                }
+                {"id": t.id, "title": t.title, "artist": t.artist, "duration": t.duration or 0,
+                 "thumbnail": t.thumbnail or "", "genre": t.genre or ""}
                 for t in tracks
             ]
         finally:
             _db.close()
 
     queue = await asyncio.to_thread(_db_queue)
-    await manager.broadcast(room_id, json.dumps({
-        "type": "queue_reordered",
-        "queue": queue,
-    }))
+    await manager.broadcast_event(room_id, 'queue_reordered', {"queue": queue})

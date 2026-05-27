@@ -224,8 +224,23 @@ export default function useLibraryData() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || 'Failed to add track');
+        let errorData = {};
+        try {
+          errorData = await response.json();
+        } catch (e) {
+          // ignore
+        }
+        const detail = (errorData.detail || '').toString();
+        const m = /Track not allowed for ingestion: (\w+)/.exec(detail);
+        if (m) {
+          const code = m[1];
+          let friendly = 'Трек не может быть добавлен';
+          if (code === 'PREVIEW_ONLY') friendly = 'Этот трек доступен только как preview в SoundCloud';
+          else if (code === 'RESTRICTED') friendly = 'Этот трек требует SoundCloud Go+ и не может быть добавлен';
+          else friendly = 'Трек недоступен для добавления';
+          throw new Error(friendly);
+        }
+        throw new Error(detail || 'Failed to add track');
       }
 
       const data = await response.json();
@@ -261,11 +276,11 @@ export default function useLibraryData() {
    * Удаление трека из библиотеки
    * @param {string} trackId - ID трека для удаления
    */
-  const removeTrack = useCallback(async (trackId) => {
+  const removeTrack = useCallback(async (trackId, trackToRemoveArg = null) => {
     if (!trackId) return;
 
     // OPTIMISTIC UI: Сохраняем трек для возможного восстановления
-    const trackToRemove = libraryTracks.find(t => t.id === trackId);
+    const trackToRemove = trackToRemoveArg || libraryTracks.find(t => t.id === trackId);
     if (!trackToRemove) return;
 
     // Сразу удаляем из UI
@@ -285,16 +300,16 @@ export default function useLibraryData() {
       }
 
       showToast('Трек удален из библиотеки', 'success');
+      await loadLibrary();
     } catch (error) {
       console.error('Error removing track:', error);
       
       // При ошибке возвращаем трек обратно
       setLibraryTracks(prev => {
-        // Находим правильную позицию для вставки (сохраняем порядок)
         const newTracks = [...prev];
         const originalIndex = libraryTracks.findIndex(t => t.id === trackId);
         
-        if (originalIndex >= 0 && originalIndex < newTracks.length) {
+        if (originalIndex >= 0 && originalIndex <= newTracks.length) {
           newTracks.splice(originalIndex, 0, trackToRemove);
         } else {
           newTracks.push(trackToRemove);
@@ -309,7 +324,7 @@ export default function useLibraryData() {
       showToast(`Ошибка удаления трека: ${error.message}`, 'error');
       throw error;
     }
-  }, [libraryTracks]);
+  }, [libraryTracks, loadLibrary]);
 
   /**
    * Обновление метаданных трека

@@ -1,8 +1,9 @@
 from fastapi import WebSocket, WebSocketDisconnect
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any, Optional
 import json
 from datetime import datetime
 import time
+import uuid
 
 class ConnectionManager:
     def __init__(self):
@@ -36,10 +37,23 @@ class ConnectionManager:
         if not skip_accept:
             state_with_role = {**self.room_states[room_id], "user_role": user_role}
             print(f"📤 Отправляю room_state клиенту (роль: {user_role}): {state_with_role}")
-            await websocket.send_json({
-                "type": "room_state",
-                "data": state_with_role
-            })
+            payload = self._wrap_event("room_state", state_with_role)
+            await websocket.send_json(payload)
+
+    def _wrap_event(self, event_type: str, data: Any, generation: Optional[int] = None) -> dict:
+        event = {
+            "type": event_type,
+            "data": data,
+            "event_id": str(uuid.uuid4()),
+            "server_timestamp": datetime.utcnow().isoformat(),
+        }
+        if generation is not None:
+            event["generation"] = generation
+        return event
+
+    async def broadcast_event(self, room_id: int, event_type: str, data: Any, generation: Optional[int] = None):
+        payload = self._wrap_event(event_type, data, generation=generation)
+        await self.broadcast(room_id, json.dumps(payload))
     
     def disconnect(self, room_id: int, websocket: WebSocket):
         if room_id in self.active_connections:

@@ -20,6 +20,8 @@ from app.services.track_service import TrackService
 from app.core.config import get_settings
 from app.domains.tracks import service as tracks_service
 from app.domains.auth.service import decode_token
+from app.room.providers.soundcloud import soundcloud_client
+from app.services.track_availability import classify_soundcloud_metadata, AvailabilityStatus
 
 settings = get_settings()
 CHUNK_SIZE = 1024 * 1024
@@ -99,6 +101,18 @@ async def add_to_library(
 ):
     """Добавить трек в библиотеку"""
     service = TrackService(db)
+    # Lightweight pre-ingestion validation for SoundCloud links
+    url = (request.url or '').strip()
+    if 'soundcloud.com' in url or url.startswith('scsearch') or url.isdigit():
+        # get raw metadata (no download)
+        raw = await soundcloud_client.get_raw_track_info(url)
+        avail = classify_soundcloud_metadata(raw)
+        if avail != AvailabilityStatus.FULL:
+            # Return friendly error to frontend
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Track not allowed for ingestion: {avail.value}",
+            )
     try:
         user_downloads_dir = str(_resolve_user_downloads_dir(current_user))
         track = await service.add_track_to_library(
@@ -176,11 +190,27 @@ async def upload_local_files(
             bitrate=None,
             codec=suffix.lstrip('.') or 'mp3',
             local_file_path=str(stored_path),
+            processing_status='processing',
+            processing_progress=0,
         )
         db.add(track)
         db.flush()
 
-        track.stream_url = f"/api/player/audio/{track.id}"
+        # Finalize via state machine: mark as successfully ingested
+        try:
+            from app.services.ingest_state import complete_success
+            complete_success(track.id, str(stored_path), None, None)
+        except Exception:
+            # fallback: do NOT set track.stream_url or processing_status here.
+            # Instead try to create a TrackAsset marking the file as ready so
+            # playability remains governed by TrackAsset.status == 'ready'.
+            try:
+                from app.database.models import TrackAsset
+                db.add(TrackAsset(track_id=track.id, local_path=str(stored_path), status='ready'))
+                db.commit()
+            except Exception:
+                db.rollback()
+                print(f"⚠️ [player] fallback complete_success failed for track {track.id}")
 
         user_track = UserTrack(user_id=current_user.id, track_id=track.id)
         db.add(user_track)
@@ -351,7 +381,11 @@ async def redownload_track(
     service = TrackService(db)
     try:
         info = await service._extract_metadata(track.source_page_url)
-        local_path = await service._download_audio(track.source_page_url, info or {})
+        dl_res = await service._download_audio(track.source_page_url, info or {})
+        if isinstance(dl_res, dict):
+            local_path = dl_res.get('local_path')
+        else:
+            local_path = dl_res
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -365,10 +399,16 @@ async def redownload_track(
         )
 
     track.local_file_path = local_path
-    track.stream_url = f"/api/player/audio/{track.id}"
-    track.stream_url_expires_at = datetime.utcnow() + timedelta(days=3650)
-    db.commit()
-    db.refresh(track)
+    # Do NOT set track.stream_url here — playability must be determined by
+    # TrackAsset.status == 'ready'. Try to finalize ingestion via complete_success.
+    try:
+        from app.services.ingest_state import complete_success
+        complete_success(track.id, local_path, None, None)
+    except Exception:
+        # Fallback: persist local path only, do not expose a playable stream_url.
+        db.commit()
+        db.refresh(track)
+        print(f"⚠️ [player] complete_success failed for redownload track {track.id}")
     return {
         "success": True,
         "track_id": track.id,
@@ -465,6 +505,13 @@ async def get_audio_file(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Track not found"
+        )
+
+    # Enforce status: only ready tracks may be streamed
+    if track.processing_status != 'ready':
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Track not ready for streaming: {track.processing_status}"
         )
 
     local_path = track.local_file_path
@@ -679,6 +726,38 @@ async def search_youtube_tracks(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Search failed: {str(e)}",
         )
+
+
+@router.get("/tracks/{track_id}")
+async def get_track_detail(
+    track_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Return track detail including processing status/progress."""
+    # Ensure ownership
+    user_track = db.query(UserTrack).filter(
+        UserTrack.user_id == current_user.id,
+        UserTrack.track_id == track_id
+    ).first()
+    if not user_track:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found in your library")
+
+    track = db.query(Track).filter(Track.id == track_id).first()
+    if not track:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Track not found")
+
+    return {
+        "id": track.id,
+        "title": track.title,
+        "artist": track.artist,
+        "duration": track.duration,
+        "stream_url": track.stream_url,
+        "thumbnail_url": track.thumbnail_url,
+        "local_file_path": track.local_file_path,
+        "processing_status": track.processing_status,
+        "processing_progress": track.processing_progress,
+    }
 
 
 # ==================== Audio Validation ====================

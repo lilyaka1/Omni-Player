@@ -52,7 +52,7 @@ class QueueStore {
     this.queue = tracks.map((track, index) => ({
       ...track,
       queueIndex: index,
-      status: track.status || (track.playUrl ? 'ready' : 'pending'),
+      status: track.status ?? track.processing_status ?? (track.playUrl ? 'ready' : 'pending'),
     }));
     
     // Сбросить индекс если он вышел за границы
@@ -68,7 +68,7 @@ class QueueStore {
     const newTrack = {
       ...track,
       queueIndex: this.queue.length,
-      status: track.status || (track.playUrl ? 'ready' : 'pending'),
+      status: track.status ?? track.processing_status ?? (track.playUrl ? 'ready' : 'pending'),
     };
     this.queue = [...this.queue, newTrack];
     this._emit('queuechange', { queue: this.queue });
@@ -79,7 +79,7 @@ class QueueStore {
     const newTracks = tracks.map((track, index) => ({
       ...track,
       queueIndex: this.queue.length + index,
-      status: track.status || (track.playUrl ? 'ready' : 'pending'),
+      status: track.status ?? track.processing_status ?? (track.playUrl ? 'ready' : 'pending'),
     }));
     this.queue = [...this.queue, ...newTracks];
     this._emit('queuechange', { queue: this.queue });

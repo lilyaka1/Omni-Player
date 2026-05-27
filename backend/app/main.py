@@ -51,13 +51,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ VoiceInsert table init: {e}")
 
-    # Применяем idempotent SQLite миграции для новых полей
+    # Read-only schema consistency check (no ALTER TABLE — avoids race condition)
     try:
         from app.database.session import engine
-        from app.database.auto_migrate import run_auto_migrations
-        run_auto_migrations(engine)
+        from app.database.auto_migrate import check_schema_consistency
+        check_schema_consistency(engine)
+    except RuntimeError as e:
+        # Fatal — app won't start
+        logger.error(f"FATAL: {e}")
+        raise
     except Exception as e:
-        logger.warning(f"⚠️ auto-migrate failed: {e}")
+        logger.warning(f"⚠️ schema check failed: {e}")
 
     # Prewarm TTS cache + запускаем timeout checker
     import asyncio
@@ -66,6 +70,15 @@ async def lifespan(app: FastAPI):
         from app.voice_inserts.queue import insert_timeout_checker
         asyncio.create_task(prewarm_cache())
         asyncio.create_task(insert_timeout_checker())
+        # start ingestion worker
+        # Ingest worker disabled to avoid schema issues in this setup.
+        # Uncomment the following lines if the database schema is fully migrated.
+        # try:
+        #     from app.services.ingest_worker import run_worker
+        #     asyncio.create_task(run_worker())
+        #     logger.info("✅ Ingest worker started")
+        # except Exception as e:
+        #     logger.warning(f"⚠️ Ingest worker failed to start: {e}")
         logger.info("✅ Voice Insert background tasks started")
     except Exception as e:
         logger.warning(f"⚠️ Voice Insert tasks: {e}")

@@ -191,8 +191,8 @@ def list_room_tracks(
             "title": track.title,
             "artist": track.artist,
             "duration": track.duration,
-            "stream_url": track.stream_url,
-            "download_status": _get_download_status(track.stream_url),
+            "queue_state": getattr(track, 'queue_state', None),
+            "asset_status": None,
             "thumbnail": track.thumbnail or "",
             "genre": track.genre or "",
             "order": track.order,
@@ -264,7 +264,9 @@ async def add_room_track(
         title=title,
         artist=artist,
         duration=payload.get("duration") or 0,
-        stream_url=resolved_stream_url,
+        # NO-OP: do NOT persist resolved stream URL here. Playability must be
+        # determined solely by TrackAsset.status == 'ready'. Store empty string.
+        stream_url="",
         thumbnail=payload.get("thumbnail") or payload.get("thumb_url") or "",
         genre=payload.get("genre") or "",
         order=next_order,
@@ -274,10 +276,80 @@ async def add_room_track(
     db.commit()
     db.refresh(track)
 
-    if not room.now_playing_track_id:
-        room.now_playing_track_id = track.id
-        room.is_playing = True
+    # Set initial queue_state: if there is a matching Track with a ready asset,
+    # mark 'ready'; if it's a pending local upload, mark 'waiting_download'.
+    try:
+        from app.database.models import Track, TrackAsset
+        orig = db.query(Track).filter(
+            Track.source == track.source,
+            Track.source_track_id == track.source_track_id,
+        ).first()
+        if orig:
+            asset = (
+                db.query(TrackAsset)
+                .filter(TrackAsset.track_id == orig.id)
+                .order_by(TrackAsset.updated_at.desc())
+                .first()
+            )
+            if asset and asset.status == 'ready':
+                try:
+                    from app.playback.controller import update_queue_state
+                    update_queue_state(track.id, 'ready')
+                except Exception:
+                    pass
+            else:
+                try:
+                    from app.playback.controller import update_queue_state
+                    update_queue_state(track.id, 'waiting_download')
+                except Exception:
+                    pass
+        else:
+            # Legacy/unknown tracks: assume ready to avoid blocking
+            try:
+                from app.playback.controller import update_queue_state
+                update_queue_state(track.id, 'ready')
+            except Exception:
+                pass
         db.commit()
+    except Exception:
+        # best-effort, do not fail the request
+        pass
+
+    # Only set as now_playing if there is a ready TrackAsset for this track.
+    # asset may have been retrieved above when resolving orig; if not, try to find Track
+    try:
+        if 'asset' not in locals() or asset is None:
+            from app.database.models import Track, TrackAsset
+            t = db.query(Track).filter(
+                Track.source == track.source,
+                Track.source_track_id == track.source_track_id,
+            ).first()
+            if t:
+                asset = (
+                    db.query(TrackAsset)
+                    .filter(TrackAsset.track_id == t.id)
+                    .order_by(TrackAsset.updated_at.desc())
+                    .first()
+                )
+            else:
+                asset = None
+    except Exception:
+        asset = None
+
+    if not room.now_playing_track_id and asset and asset.status == 'ready':
+        try:
+            from app.playback.controller import start_playback
+            started_id = start_playback(room_id)
+            if started_id:
+                try:
+                    from app.playback.loop import playback_loop
+                    playback_loop.register_room(room_id)
+                    print(f"🎵 [router] First track added — playback loop registered for room {room_id}")
+                except Exception as e:
+                    print(f"⚠️ [router] playback_loop.register_room failed: {e}")
+        except Exception:
+            # best-effort: do not block the API
+            pass
 
     return {
         "id": track.id,
@@ -339,9 +411,12 @@ def clear_room_tracks(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
     db.query(RoomTrack).filter(RoomTrack.room_id == room_id).delete(synchronize_session=False)
-    room.now_playing_track_id = None
-    room.is_playing = False
-    db.commit()
+    try:
+        from app.playback.controller import stop_playback
+        stop_playback(room_id)
+    except Exception:
+        # controller unavailable — do not mutate playback state here
+        print(f"⚠️ [router] controller.stop_playback unavailable for room {room_id}")
 
 
 @router.put("/{room_id}/tracks/reorder")

@@ -77,9 +77,41 @@ class Room(Base):
     playback_started_at = Column(DateTime)
     is_playing = Column(Boolean, default=False)
     queue_mode = Column(String, default="normal")  # normal | loop | shuffle
+    queue_version = Column(Integer, default=0, nullable=False)  # optimistic concurrency
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, onupdate=datetime.utcnow)
+
+
+class PlaybackSession(Base):
+    __tablename__ = "playback_session"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_id = Column(Integer, ForeignKey("room.id"), nullable=False, unique=True)
+    current_queue_item_id = Column(Integer, ForeignKey("room_track.id"), nullable=True)
+    playback_state = Column(String(32), default="idle")  # idle | playing | stalled | recovering | failed | stopped
+    started_at = Column(DateTime, nullable=True)
+    expected_end_at = Column(DateTime, nullable=True)
+    playback_position = Column(Float, default=0.0)
+    generation = Column(Integer, default=0, nullable=False)
+    updated_at = Column(DateTime, onupdate=datetime.utcnow)
+    retry_count = Column(Integer, default=0, nullable=False)
+    last_error_at = Column(DateTime, nullable=True)
+
+
+class MediaAsset(Base):
+    __tablename__ = "media_asset"
+
+    id = Column(Integer, primary_key=True, index=True)
+    storage_path = Column(String, nullable=False)
+    size = Column(Integer, nullable=True)
+    mime = Column(String, nullable=True)
+    canonical_key = Column(String, index=True, nullable=True)
+    fingerprint_meta = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # reverse relation to Track (a single asset can be referenced by multiple tracks)
+    tracks = relationship("Track", back_populates="media_asset")
 
 
 class RoomTrack(Base):
@@ -103,6 +135,9 @@ class RoomTrack(Base):
 
     order = Column("order", Integer)
     added_by_id = Column(Integer, ForeignKey("user.id"))
+    # Playback queue state for this queue item — separate from asset status
+    # Possible values: waiting_download | ready | playing | played | skipped | failed
+    queue_state = Column(String(20), default="ready")
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -128,10 +163,37 @@ class Track(Base):
     bitrate = Column(Integer)
     codec = Column(String)
     local_file_path = Column(String)
+    # canonical key for deduplication (e.g. sha256 or fingerprint)
+    canonical_key = Column(String, index=True, nullable=True)
+    # Personal-mode processing status: processing | ready | failed
+    processing_status = Column(String(16), default="ready")
+    processing_progress = Column(Integer, nullable=True)
+    # Ingestion reliability fields
+    ingest_locked = Column(Boolean, default=False, nullable=False)
+    ingest_attempts = Column(Integer, default=0, nullable=False)
+    ingest_started_at = Column(DateTime, nullable=True)
+
+    # Link to stored physical asset (optional)
+    media_asset_id = Column(Integer, ForeignKey("media_asset.id"), nullable=True)
+    media_asset = relationship("MediaAsset", back_populates="tracks")
 
     total_plays = Column(Integer, default=0)
     unique_listeners = Column(Integer, default=0)
 
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, onupdate=datetime.utcnow)
+
+
+class TrackAsset(Base):
+    __tablename__ = "track_asset"
+
+    id = Column(Integer, primary_key=True, index=True)
+    track_id = Column(Integer, ForeignKey("track.id"), nullable=False)
+    source_type = Column(String(20), nullable=True)  # local | remote | s3 | proxy
+    local_path = Column(String, nullable=True)
+    mime = Column(String, nullable=True)
+    duration = Column(Float, nullable=True)
+    status = Column(String(16), default="pending")  # pending | downloading | ready | failed
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, onupdate=datetime.utcnow)
 

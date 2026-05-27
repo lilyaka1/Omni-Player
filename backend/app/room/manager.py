@@ -21,6 +21,7 @@ from typing import Dict, Optional
 from app.room.ffmpeg import stream_ffmpeg
 from app.room.queue import advance_track, peek_next_track
 from app.room.room_state import RoomState
+from app.voice_inserts.queue import build_room_voice_sequence, get_room_voice_sequence_signature
 
 # Куда складываем локальные mp3
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -49,6 +50,16 @@ class RoomManager:
         self._last_activity: Dict[int, float] = {}
         # ID треков, для которых сейчас идёт скачивание (антидубликат).
         self._downloading: set[int] = set()
+        # Lock to prevent double-broadcast-start from concurrent requests.
+        self._start_locks: Dict[int, asyncio.Lock] = {}
+        self._locks_lock = asyncio.Lock()
+
+    async def _get_start_lock(self, room_id: int) -> asyncio.Lock:
+        """Get or create a per-room lock for broadcast start."""
+        async with self._locks_lock:
+            if room_id not in self._start_locks:
+                self._start_locks[room_id] = asyncio.Lock()
+            return self._start_locks[room_id]
 
     # ──────────────────────────────────────────────────────────────────── #
     #  Public API                                                          #
@@ -64,28 +75,39 @@ class RoomManager:
         return bc is not None and bc.running
 
     async def start_room(self, room_id: int, db_session_factory, soundcloud_client):
-        bc = self.get_or_create(room_id)
-        if bc.running:
-            print(f"📻 Room {room_id} broadcast already running")
-            return
+        lock = await self._get_start_lock(room_id)
+        async with lock:
+            bc = self.get_or_create(room_id)
+            if bc.running:
+                print(f"📻 Room {room_id} broadcast already running")
+                return
 
-        # Прогреваем TTS-кэш и фоном докачиваем файлы для всех треков комнаты.
-        try:
-            from app.voice_inserts.queue import prewarm_room
-            asyncio.create_task(prewarm_room(room_id))
-        except Exception as e:
-            print(f"⚠️ Room {room_id}: voice prewarm not started: {e}")
+            asyncio.create_task(
+                self.prefetch_room_files(room_id, db_session_factory, soundcloud_client)
+            )
 
-        asyncio.create_task(
-            self.prefetch_room_files(room_id, db_session_factory, soundcloud_client)
-        )
+            # Pre-playback hook: фиксируем voice inserts до первого запуска loop.
+            try:
+                await self._prepare_room_voice_sequence(bc, room_id)
+            except Exception as e:
+                print(f"⚠️ Room {room_id}: voice inserts pre-playback hook failed: {e}")
 
-        bc.running = True
-        bc.task = asyncio.create_task(
-            self._broadcast_loop(bc, room_id, db_session_factory, soundcloud_client)
-        )
-        self._last_activity[room_id] = _t.monotonic()
-        print(f"🎙️ Room {room_id}: broadcast STARTED")
+            print("[ROOM START] room_id =", room_id)
+            print("[ROOM START] inserts =", len(bc.voice_insert_queue))
+
+            # Параллельно прогреваем общий TTS-кэш и фоном докачиваем файлы для всех треков комнаты.
+            try:
+                from app.voice_inserts.queue import prewarm_room
+                asyncio.create_task(prewarm_room(room_id))
+            except Exception as e:
+                print(f"⚠️ Room {room_id}: voice cache prewarm not started: {e}")
+
+            bc.running = True
+            bc.task = asyncio.create_task(
+                self._broadcast_loop(bc, room_id, db_session_factory, soundcloud_client)
+            )
+            self._last_activity[room_id] = _t.monotonic()
+            print(f"🎙️ Room {room_id}: broadcast STARTED")
 
     async def stop_room(self, room_id: int):
         bc = self.broadcasts.get(room_id)
@@ -186,7 +208,8 @@ class RoomManager:
                     t = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
                     if not t:
                         return None
-                    t.stream_url = local_path
+                    # NO-OP: do NOT persist local_path into RoomTrack.stream_url here.
+                    # Playability must be determined by TrackAsset.status == 'ready'.
                     saved_thumb = None
                     if new_thumb and not t.thumbnail:
                         t.thumbnail = new_thumb
@@ -249,6 +272,14 @@ class RoomManager:
     #  Broadcast loop                                                      #
     # ──────────────────────────────────────────────────────────────────── #
 
+    async def _prepare_room_voice_sequence(self, bc: RoomState, room_id: int):
+        voice_sequence = await build_room_voice_sequence(room_id)
+        bc.set_voice_insert_queue(
+            voice_sequence,
+            get_room_voice_sequence_signature(room_id),
+        )
+        return voice_sequence
+
     async def _broadcast_loop(
         self,
         bc: RoomState,
@@ -261,8 +292,10 @@ class RoomManager:
         def _fetch_playback_state():
             db = db_session_factory()
             try:
+                # ── FIX: was requiring is_playing + now_playing_track_id separately.
+                # MVP: if brоadcast is running, let it work. Rely on now_playing_track_id only.
                 room = db.query(Room).filter(Room.id == room_id).first()
-                if not room or not room.is_playing or not room.now_playing_track_id:
+                if not room or not room.now_playing_track_id:
                     return None
                 t = (
                     db.query(RoomTrack)
@@ -271,11 +304,38 @@ class RoomManager:
                 )
                 if not t:
                     return None
+                stream_url = t.stream_url
+
+                # ── FIX: resolve pending local-upload → direct FILE PATH (NO /api/ redirect) ──
+                # Radio-mode rule: stream_url MUST be absolute file path or http(s) URL.
+                # Using /api/ URL causes redirect loops. Always resolve to local_file_path.
+                if stream_url and (stream_url == "pending://local-upload" or stream_url.startswith("local-upload://")):
+                    from app.database.models import Track, SourceEnum
+                    src_id = t.source_track_id or ""
+                    resolved_path = None
+                    if src_id.isdigit():
+                        orig = db.query(Track).filter(Track.id == int(src_id)).first()
+                        if orig and orig.local_file_path:
+                            resolved_path = orig.local_file_path
+                    if not resolved_path:
+                        # вторичный поиск по title если source_track_id не число
+                        orig = db.query(Track).filter(
+                            Track.source == SourceEnum.LOCAL,
+                            Track.title == t.title,
+                            Track.artist == t.artist,
+                        ).first()
+                        if orig and orig.local_file_path:
+                            resolved_path = orig.local_file_path
+                    if resolved_path:
+                        stream_url = resolved_path
+                        # DO NOT persist resolved_path into DB here; leave RoomTrack.stream_url
+                        # unchanged to avoid giving playback a direct file path.
+
                 return {
                     "track_id": t.id,
                     "title": t.title,
                     "artist": t.artist,
-                    "stream_url": t.stream_url,
+                    "stream_url": stream_url,
                     "source": t.source,
                     "source_track_id": t.source_track_id,
                     "thumbnail": t.thumbnail,
@@ -305,6 +365,8 @@ class RoomManager:
 
         print(f"🔄 Room {room_id}: broadcast loop started")
         last_track_id = None
+        consecutive_skips = 0
+        _MAX_SKIP_BEFORE_STALL_RESET = 5  # после 5 пропусков подряд — гасим is_playing
 
         while bc.running:
             try:
@@ -322,6 +384,8 @@ class RoomManager:
                 bc.current_track_id = track_id
                 bc.current_track_title = f"{state['artist']} - {state['title']}"
                 bc.skip_event.clear()
+
+                print("[TRACK START]", track_id)
 
                 # voice prewarm если очередь к концу
                 try:
@@ -346,6 +410,11 @@ class RoomManager:
 
                 if not local_path:
                     print(f"❌ Room {room_id}: cannot get file for track {track_id}, skipping")
+                    consecutive_skips += 1
+                    if consecutive_skips >= _MAX_SKIP_BEFORE_STALL_RESET:
+                        print(f"⚠️ Room {room_id}: {consecutive_skips} consecutive skips — stopping broadcast")
+                        bc.running = False
+                        break
                     advanced = await advance_track(room_id, db_session_factory)
                     if not advanced:
                         bc.running = False
@@ -387,7 +456,8 @@ class RoomManager:
                     await asyncio.sleep(1)
                     continue
 
-                # Трек закончился штатно → проигрываем готовые voice inserts
+                # Трек закончился штатно → проигрываем готовые voice inserts.
+                print("[TRACK END]", track_id)
                 await self._play_voice_inserts(bc, room_id, track_id)
 
                 advanced = await advance_track(room_id, db_session_factory)
@@ -413,22 +483,12 @@ class RoomManager:
     # ──────────────────────────────────────────────────────────────────── #
 
     async def _play_voice_inserts(self, bc: RoomState, room_id: int, just_played_track_id: int):
-        """Между треками — проигрываем все ready inserts по очереди."""
-        try:
-            from app.voice_inserts.queue import pop_ready_inserts, mark_insert_played
-        except Exception as e:
-            print(f"⚠️ [voice] cannot import queue helpers: {e}")
-            return
-
-        try:
-            inserts = await pop_ready_inserts(room_id, just_played_track_id)
-        except Exception as e:
-            print(f"⚠️ [voice] pop_ready_inserts failed: {e}")
-            return
-
+        """Между треками — проигрываем уже подготовленные inserts."""
+        inserts = bc.consume_voice_inserts(just_played_track_id)
         if not inserts:
             return
 
+        print("[INSERT QUEUE SIZE]", len(inserts))
         print(f"🗣️  [voice] room {room_id}: playing {len(inserts)} inserts")
         for ins in inserts:
             audio_path = getattr(ins, "audio_path", None) or (
@@ -437,6 +497,7 @@ class RoomManager:
             insert_id = getattr(ins, "id", None) or (
                 ins.get("id") if isinstance(ins, dict) else None
             )
+            print("[INSERT PLAY]", insert_id)
             if not audio_path or not os.path.isfile(audio_path):
                 print(f"⚠️ [voice] insert {insert_id}: file missing ({audio_path})")
                 continue
@@ -445,9 +506,10 @@ class RoomManager:
                 await self._broadcast_insert_event(room_id, insert_id, "playing")
                 result = await stream_ffmpeg(bc, audio_path)
                 if result is False:
-                    return  # broadcast остановлен
+                    return
                 if insert_id is not None:
                     try:
+                        from app.voice_inserts.queue import mark_insert_played
                         await mark_insert_played(insert_id)
                     except Exception as e:
                         print(f"⚠️ [voice] mark_insert_played({insert_id}) failed: {e}")

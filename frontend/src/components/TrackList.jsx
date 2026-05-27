@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { formatDuration } from '../utils/format';
 import QueueStore from '../utils/QueueStore';
+import TrackItem from './TrackItem';
 
 const TrackList = ({
   tracks,
@@ -118,84 +119,15 @@ const TrackList = ({
               cursor: isDraggable ? 'grab' : 'default'
             }}
           >
-            <div className="track-thumbnail">
-              {track.thumbnail ? (
-                <img src={track.thumbnail} alt={track.title} />
-              ) : (
-                <div className="track-thumbnail-placeholder">
-                  <span>🎵</span>
-                </div>
-              )}
-              {isActive && (
-                <div className="track-playing-indicator">
-                  <div className="equalizer">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="track-info">
-              <div className="track-title">{track.title}</div>
-              {track.artist && (
-                <div className="track-artist">{track.artist}</div>
-              )}
-              <div className="track-meta">
-                {track.duration && (
-                  <span className="track-duration">
-                    {formatDuration(track.duration)}
-                  </span>
-                )}
-                {sourceBadge && (
-                  <span className={`source-badge ${sourceBadge.class}`}>
-                    {sourceBadge.text}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="track-actions">
-              <button
-                className="btn-icon"
-                onClick={() => onPlay(track)}
-                title={isActive ? 'Играет' : 'Воспроизвести'}
-              >
-                {isActive ? '⏸' : '▶'}
-              </button>
-
-              <button
-                className="btn-icon"
-                onClick={() => onEdit(track)}
-                title="Редактировать"
-              >
-                ✏️
-              </button>
-
-              {canRedownload(track) && (
-                <button
-                  className="btn-icon"
-                  onClick={() => onRedownload(track)}
-                  disabled={isRedownloading}
-                  title="Перезагрузить"
-                >
-                  {isRedownloading ? (
-                    <span className="spinner-small">⟳</span>
-                  ) : (
-                    '🔄'
-                  )}
-                </button>
-              )}
-
-              <button
-                className="btn-icon btn-danger"
-                onClick={() => onRemove(track)}
-                title="Удалить"
-              >
-                🗑️
-              </button>
-            </div>
+            <TrackItem
+              track={track}
+              isActive={isActive}
+              isRedownloading={isRedownloading}
+              onPlay={onPlay}
+              onEdit={onEdit}
+              onRedownload={onRedownload}
+              onRemove={onRemove}
+            />
           </div>
         );
       })}

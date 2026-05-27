@@ -59,7 +59,4 @@ async def websocket_endpoint(
         manager.disconnect(room_id, websocket)
         room_state = manager.get_room_state(room_id)
         if room_state:
-            await manager.broadcast(
-                room_id,
-                json.dumps({"type": "user_count", "count": room_state["users"]}),
-            )
+            await manager.broadcast_event(room_id, 'user_count', {"count": room_state["users"]})

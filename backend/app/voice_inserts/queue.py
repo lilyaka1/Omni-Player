@@ -3,14 +3,19 @@ Insert queue: создание, pre-generation, timeout checker.
 Интегрируется с room_manager для pre-generation на основе queue depth.
 """
 import asyncio
+import hashlib
+import json
+import mimetypes
 import logging
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import select
 
 from app.database.session import SessionLocal
-from app.database.models import Room
+from app.database.models import MediaAsset, Room, RoomTrack
 from app.voice_inserts.model import VoiceInsert
 from app.voice_inserts.tts import (
     generate_speech,
@@ -22,9 +27,190 @@ from app.voice_inserts.tts import (
 
 log = logging.getLogger(__name__)
 
+_room_voice_sequence_cache = {}
+
 # ── Content hash для кэширования ─────────────────────────────────────────────
 def calc_hash(text: str, voice_id: str = "en_US-libritts-high") -> str:
     return _content_hash(text, voice_id)
+
+
+def get_room_voice_sequence_signature(room_id: int) -> Optional[str]:
+    cached = _room_voice_sequence_cache.get(room_id)
+    if not cached:
+        return None
+    return cached.get("signature")
+
+
+def _load_room_voice_snapshot(room_id: int):
+    db = SessionLocal()
+    try:
+        room = db.get(Room, room_id)
+        if room is None:
+            return None
+
+        tracks = (
+            db.query(RoomTrack)
+            .filter(RoomTrack.room_id == room_id)
+            .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
+            .all()
+        )
+
+        return {
+            "room": {
+                "id": room.id,
+                "name": room.name or "",
+                "description": room.description or "",
+                "queue_mode": room.queue_mode or "normal",
+            },
+            "tracks": [
+                {
+                    "id": track.id,
+                    "title": track.title or "",
+                    "artist": track.artist or "",
+                    "order": track.order if track.order is not None else -1,
+                }
+                for track in tracks
+            ],
+        }
+    finally:
+        db.close()
+
+
+def _room_voice_sequence_signature(snapshot: dict) -> str:
+    payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _build_voice_text(room_name: str, _current_track: dict, next_track: dict, boundary_index: int) -> tuple[str, str]:
+    next_label = " — ".join([part for part in [next_track.get("artist"), next_track.get("title")] if part])
+    if not next_label:
+        next_label = next_track.get("title") or "следующий трек"
+
+    if boundary_index % 4 == 0:
+        return (
+            "system",
+            f"В комнате {room_name or 'Omni Player'} скоро следующий трек: {next_label}",
+        )
+
+    if boundary_index % 3 == 0:
+        return (
+            "ad",
+            f"Не переключайте. Впереди ещё {next_label}",
+        )
+
+    return (
+        "track",
+        f"Следующий трек: {next_label}",
+    )
+
+
+def _upsert_media_asset(audio_path: str, canonical_key: str, fingerprint_meta: str) -> Optional[int]:
+    if not audio_path or not os.path.isfile(audio_path):
+        return None
+
+    db = SessionLocal()
+    try:
+        asset = db.query(MediaAsset).filter(MediaAsset.canonical_key == canonical_key).first()
+        if asset is None:
+            size = os.path.getsize(audio_path)
+            mime = mimetypes.guess_type(audio_path)[0] or "audio/mpeg"
+            asset = MediaAsset(
+                storage_path=str(Path(audio_path).resolve()),
+                size=size,
+                mime=mime,
+                canonical_key=canonical_key,
+                fingerprint_meta=fingerprint_meta,
+            )
+            db.add(asset)
+            db.commit()
+            db.refresh(asset)
+        elif not asset.storage_path:
+            asset.storage_path = str(Path(audio_path).resolve())
+            if not asset.size:
+                asset.size = os.path.getsize(audio_path)
+            if not asset.mime:
+                asset.mime = mimetypes.guess_type(audio_path)[0] or "audio/mpeg"
+            if not asset.fingerprint_meta:
+                asset.fingerprint_meta = fingerprint_meta
+            db.commit()
+        return asset.id
+    finally:
+        db.close()
+
+
+async def build_room_voice_sequence(room_id: int) -> list[dict]:
+    """Pre-generate deterministic room voice inserts and cache them by room state."""
+    snapshot = await asyncio.to_thread(_load_room_voice_snapshot, room_id)
+    if not snapshot:
+        _room_voice_sequence_cache.pop(room_id, None)
+        return []
+
+    signature = _room_voice_sequence_signature(snapshot)
+    cached = _room_voice_sequence_cache.get(room_id)
+    if cached and cached.get("signature") == signature:
+        return [dict(item) for item in cached.get("items", [])]
+
+    tracks = snapshot["tracks"]
+    if len(tracks) < 2:
+        _room_voice_sequence_cache[room_id] = {"signature": signature, "items": []}
+        return []
+
+    room_name = snapshot["room"]["name"]
+    inserts: list[dict] = []
+    boundary_pairs = list(zip(tracks, tracks[1:]))
+    if snapshot["room"]["queue_mode"] == "loop" and len(tracks) > 1:
+        boundary_pairs.append((tracks[-1], tracks[0]))
+
+    for boundary_index, (current_track, next_track) in enumerate(boundary_pairs, start=1):
+        kind, text = _build_voice_text(room_name, current_track, next_track, boundary_index)
+        result = await generate_speech(text)
+        if not result.success or not result.audio_path:
+            log.warning(
+                "Room voice sequence generation failed for room %s boundary %s: %s",
+                room_id,
+                boundary_index,
+                result.error,
+            )
+            continue
+
+        content_hash = Path(result.audio_path).stem
+        media_asset_id = await asyncio.to_thread(
+            _upsert_media_asset,
+            result.audio_path,
+            f"tts:{content_hash}",
+            json.dumps(
+                {
+                    "room_id": room_id,
+                    "kind": kind,
+                    "text": text,
+                    "play_after_track_id": current_track["id"],
+                    "next_track_id": next_track["id"],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
+
+        inserts.append(
+            {
+                "kind": kind,
+                "text": text,
+                "audio_path": result.audio_path,
+                "duration_sec": result.duration_sec,
+                "content_hash": content_hash,
+                "media_asset_id": media_asset_id,
+                "play_after_track_id": current_track["id"],
+                "track_id": current_track["id"],
+                "next_track_id": next_track["id"],
+                "sequence_index": boundary_index,
+            }
+        )
+
+    _room_voice_sequence_cache[room_id] = {
+        "signature": signature,
+        "items": [dict(item) for item in inserts],
+    }
+    return [dict(item) for item in inserts]
 
 
 # ── Room-level insert limits ─────────────────────────────────────────────────
@@ -163,8 +349,7 @@ async def _broadcast_insert_ready(insert: VoiceInsert) -> None:
         from app.websocket.manager import manager
         import json
 
-        payload = {
-            "type": "insert_ready",
+        await manager.broadcast_event(insert.room_id, 'insert_ready', {
             "insert": {
                 "id": insert.id,
                 "text": insert.text,
@@ -173,9 +358,8 @@ async def _broadcast_insert_ready(insert: VoiceInsert) -> None:
                 "scheduled_at": insert.scheduled_at.isoformat(),
                 "audio_url": f"/tts/{insert.content_hash}.mp3",
                 "duration_sec": insert.duration_sec,
-            },
-        }
-        await manager.broadcast(insert.room_id, json.dumps(payload))
+            }
+        })
     except Exception as e:
         log.warning(f"Broadcast insert_ready failed: {e}")
 
@@ -235,14 +419,9 @@ async def insert_timeout_checker() -> None:
                     try:
                         from app.websocket.manager import manager
                         import json
-                        payload = json.dumps({
-                            "type": "insert_timeout",
-                            "insert": {
-                                "id": insert.id,
-                                "text": insert.text,
-                            },
+                        await manager.broadcast_event(insert.room_id, 'insert_timeout', {
+                            "insert": {"id": insert.id, "text": insert.text}
                         })
-                        await manager.broadcast(insert.room_id, payload)
                     except Exception as e:
                         log.warning(f"Broadcast insert_timeout failed: {e}")
             finally:
@@ -340,11 +519,7 @@ async def cancel_insert(insert_id: int, user_id: int) -> bool:
         try:
             from app.websocket.manager import manager
             import json
-            payload = json.dumps({
-                "type": "insert_cancelled",
-                "insert_id": insert_id,
-            })
-            await manager.broadcast(insert.room_id, payload)
+            await manager.broadcast_event(insert.room_id, 'insert_cancelled', {"insert_id": insert_id})
         except Exception:
             pass
 
@@ -438,11 +613,7 @@ async def clear_room_inserts(room_id: int) -> int:
         try:
             from app.websocket.manager import manager
             import json
-            payload = json.dumps({
-                "type": "insert_cleared",
-                "count": len(inserts),
-            })
-            await manager.broadcast(room_id, payload)
+            await manager.broadcast_event(room_id, 'insert_cleared', {"count": len(inserts)})
         except Exception:
             pass
 

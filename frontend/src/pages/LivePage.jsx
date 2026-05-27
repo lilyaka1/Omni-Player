@@ -194,11 +194,6 @@ export default function LivePage() {
   async function addTrackToEnd(track) {
     if (!selectedRoomId) return;
 
-    if (!isTrackReadyForQueue(track)) {
-      showToast('Сначала дождитесь загрузки трека', 'error');
-      return;
-    }
-
     const trackId = Number(track?.id);
     const existingIdx = queue.findIndex((item) => Number(item.id) === trackId);
 

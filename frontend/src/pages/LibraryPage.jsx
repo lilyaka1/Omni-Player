@@ -216,9 +216,12 @@ export default function LibraryPage() {
     QueueStore.setQueue(libraryTracks);
   }, [libraryTracks]);
 
+  const isCurrentTrackReady = currentTrack?.processing_status ? currentTrack.processing_status === 'ready' : true;
+
   // Загрузка трека в AudioManager при изменении currentTrack
   useEffect(() => {
-    if (currentTrack?.playUrl) {
+    const shouldLoad = currentTrack?.playUrl && isCurrentTrackReady;
+    if (shouldLoad) {
       AudioManager.loadTrack(currentTrack);
       setDuration(Number(currentTrack.duration) || 0);
     } else {
@@ -227,18 +230,18 @@ export default function LibraryPage() {
       setDuration(0);
       setIsPlaying(false);
     }
-  }, [currentTrack?.id]);
+  }, [currentTrack?.id, currentTrack?.playUrl, currentTrack?.processing_status]);
 
   // Автовоспроизведение при изменении isPlaying
   useEffect(() => {
-    if (!currentTrack?.playUrl) return;
+    if (!currentTrack?.playUrl || !isCurrentTrackReady) return;
 
     if (isPlaying) {
       AudioManager.play().catch(() => setIsPlaying(false));
     } else {
       AudioManager.pause();
     }
-  }, [isPlaying, currentTrack?.playUrl]);
+  }, [isPlaying, currentTrack?.playUrl, currentTrack?.processing_status]);
 
   // Preload следующего трека
   useEffect(() => {
@@ -251,7 +254,7 @@ export default function LibraryPage() {
     }
 
     const nextTrack = QueueStore.getQueue()[nextIndex];
-    if (!nextTrack?.playUrl) {
+    if (!nextTrack?.playUrl || (nextTrack.processing_status && nextTrack.processing_status !== 'ready')) {
       return;
     }
 
@@ -357,6 +360,10 @@ export default function LibraryPage() {
   function playTrackByIndex(index) {
     if (index < 0 || index >= libraryTracks.length) return;
     const track = libraryTracks[index];
+    if (track?.processing_status && track.processing_status !== 'ready') {
+      showToast(`Трек ещё не готов: ${track.processing_status}`, 'error');
+      return;
+    }
     if (!track?.playUrl) {
       showToast('Этот трек пока не доступен для локального прослушивания', 'error');
       return;
@@ -450,8 +457,7 @@ export default function LibraryPage() {
 
   async function handleRemoveTrack(track) {
     try {
-      await removeTrack(track.id);
-      await loadLibrary();
+      await removeTrack(track.id, track);
     } catch {
       // Ошибка уже обработана в хуке
     }
@@ -690,15 +696,38 @@ export default function LibraryPage() {
               {!searchLoading && !searchResults.length && <div className="empty-state" style={{ gridColumn: '1/-1' }}><i className="fa-solid fa-music" /><p>Ничего не найдено</p></div>}
               {!searchLoading && searchResults.map((t, index) => {
                 const pageUrl = t.page_url || t.track_page_url || '';
+                const avail = (t.availability || 'UNKNOWN');
+                const isAllowed = avail === 'FULL';
+                const reasonMap = {
+                  'PREVIEW_ONLY': 'SoundCloud preview only',
+                  'RESTRICTED': 'Requires SoundCloud Go+',
+                  'UNKNOWN': 'Track unavailable',
+                };
+                const reason = isAllowed ? '' : (reasonMap[avail] || 'Track unavailable');
+
                 return (
                   <div key={`${t.title}-${index}`} className="search-result-card glass glass-secondary">
                     <div className="search-result-thumb">
                       {t.thumbnail ? <img src={t.thumbnail} alt="" loading="lazy" /> : <i className="fa-solid fa-music" style={{ fontSize: '2rem', color: 'var(--accent)', opacity: 0.4 }} />}
                     </div>
                     <div className="search-result-info">
-                      <div className="search-result-title">{t.title}</div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <div className="search-result-title">{t.title}</div>
+                        {t.source === 'soundcloud' && t.availability && t.availability !== 'FULL' && (
+                          <span className={`badge glass-flat availability-${String(t.availability).toLowerCase()}`} title={reason}>
+                            {t.availability === 'PREVIEW_ONLY' ? 'Preview only' : (t.availability === 'RESTRICTED' ? 'Restricted' : 'Unknown')}
+                          </span>
+                        )}
+                      </div>
                       <div className="search-result-sub">{t.duration ? formatTime(t.duration) : '—'}</div>
-                      <button className="search-result-add" onClick={() => handleAddTrackFromSearch(t)}><i className="fa-solid fa-bookmark" /> В библиотеку</button>
+                      <button
+                        className="search-result-add"
+                        onClick={() => handleAddTrackFromSearch(t)}
+                        disabled={!isAllowed}
+                        title={!isAllowed ? reason : 'Добавить в библиотеку'}
+                      >
+                        <i className="fa-solid fa-bookmark" /> В библиотеку
+                      </button>
                     </div>
                   </div>
                 );
@@ -724,13 +753,20 @@ export default function LibraryPage() {
                     <div className="track-item-title">{track.title || 'Без названия'}</div>
                     <div className="track-item-meta">
                       {track.duration ? formatTime(track.duration) : '—'}
-                      <span className={`source-badge glass-flat ${track.source === 'youtube' ? 'source-yt' : (track.source === 'local' ? 'source-local' : 'source-sc')}`} style={{ marginLeft: 4 }}>
-                        {track.source === 'youtube' ? 'YT' : (track.source === 'local' ? 'FILE' : 'SC')}
-                      </span>
+                        <span className={`source-badge glass-flat ${track.source === 'youtube' ? 'source-yt' : (track.source === 'local' ? 'source-local' : 'source-sc')}`} style={{ marginLeft: 4 }}>
+                          {track.source === 'youtube' ? 'YT' : (track.source === 'local' ? 'FILE' : 'SC')}
+                        </span>
+                        {track.source === 'soundcloud' && track.availability && track.availability !== 'FULL' && (
+                          <span className={`badge glass-flat availability-${String(track.availability).toLowerCase()}`} style={{ marginLeft: 8 }} title={
+                            track.availability === 'PREVIEW_ONLY' ? 'SoundCloud preview only' : (track.availability === 'RESTRICTED' ? 'Requires SoundCloud Go+' : 'Track unavailable')
+                          }>
+                            {track.availability === 'PREVIEW_ONLY' ? 'Preview only' : (track.availability === 'RESTRICTED' ? 'Restricted' : 'Unknown')}
+                          </span>
+                        )}
                     </div>
                   </div>
                   <div className="track-actions">
-                    {track.playUrl && <button className="track-act-btn" onClick={() => playTrackByIndex(index)} title="Слушать"><i className="fa-solid fa-play" /></button>}
+                      {(track.playUrl && (!track.availability || track.availability === 'FULL')) && <button className="track-act-btn" onClick={() => playTrackByIndex(index)} title={(!track.availability || track.availability === 'FULL') ? 'Слушать' : 'Трек недоступен'}><i className="fa-solid fa-play" /></button>}
                     <button className="track-act-btn" onClick={() => handleEditTrack(track)} title="Редактировать">
                       <i className="fa-solid fa-pen" />
                     </button>

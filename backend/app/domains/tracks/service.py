@@ -12,6 +12,7 @@ async def search_soundcloud(query: str, limit: int = 10) -> List[Dict]:
     tracks = []
     for track in results:
         track_page_url = track.get("track_page_url", "")
+        availability = track.get("availability") or "unknown"
         tracks.append({
             "id": f"search_{track.get('id')}",
             "source_id": track.get("id"),
@@ -19,6 +20,8 @@ async def search_soundcloud(query: str, limit: int = 10) -> List[Dict]:
             "artist": track.get("artist", "Unknown"),
             "duration": track.get("duration"),
             "source": "soundcloud",
+            # availability: FULL | PREVIEW_ONLY | RESTRICTED | UNKNOWN
+            "availability": availability,
             "source_track_id": track_page_url,
             "url": track.get("url", ""),
             "thumbnail": track.get("thumbnail", ""),

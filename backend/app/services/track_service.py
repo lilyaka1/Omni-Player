@@ -10,7 +10,11 @@ from typing import Dict, Optional, List
 from sqlalchemy.orm import Session
 import yt_dlp
 
-from app.database.models import Track, UserTrack, Playlist, PlaylistTrack, SourceEnum
+import hashlib
+import mimetypes
+
+from app.database.models import Track, UserTrack, Playlist, PlaylistTrack, SourceEnum, MediaAsset
+from app.core.storage import get_storage
 from app.core.config import get_settings
 from app.services.metadata import split_artist_title
 
@@ -64,11 +68,14 @@ class TrackService:
             if existing.stream_url_expires_at < datetime.utcnow():
                 existing = await self.refresh_stream_url(existing)
         else:
-            # Извлечь метаданные через yt-dlp
+            # Создать Track из метаданных без скачивания (download worker будет работать в фоне)
             existing = await self.create_track_from_url(
                 track_url,
+                download=False,
                 target_downloads_dir=target_downloads_dir,
             )
+
+            # background ingestion will be handled by the centralized ingest worker
         
         # Добавить в библиотеку юзера (если еще нет)
         user_track = self.db.query(UserTrack).filter(
@@ -96,12 +103,20 @@ class TrackService:
         
         # Скачать аудиофайл если download=True
         local_file_path = None
+        media_asset_id = None
+        canonical_key = None
         if download:
-            local_file_path = await self._download_audio(
+            dl_result = await self._download_audio(
                 url,
                 info,
                 target_downloads_dir=target_downloads_dir,
             )
+            if isinstance(dl_result, dict):
+                local_file_path = dl_result.get('local_path')
+                media_asset_id = dl_result.get('media_asset_id')
+                canonical_key = dl_result.get('canonical')
+            else:
+                local_file_path = dl_result
         
         title, artist = split_artist_title(
             info.get('title', 'Unknown'),
@@ -123,11 +138,26 @@ class TrackService:
             album=info.get('album'),
             genre=info.get('genre'),
             year=info.get('release_year'),
-            local_file_path=local_file_path
+            local_file_path=local_file_path,
+            canonical_key=canonical_key,
+            media_asset_id=media_asset_id,
+            processing_status=('ready' if local_file_path else 'processing'),
+            processing_progress=(100 if local_file_path else 0),
         )
         self.db.add(track)
         self.db.commit()
         self.db.refresh(track)
+        # If we downloaded a local file, do NOT set `track.stream_url` here.
+        # Instead finalize ingestion so a TrackAsset is created and playability
+        # is determined by TrackAsset.status == 'ready'.
+        if local_file_path:
+            try:
+                from app.services.ingest_state import complete_success
+                complete_success(track.id, local_file_path, None, None)
+            except Exception:
+                # If ingestion finalization fails, leave the track record
+                # without an internal playable URL; ingestion worker can retry.
+                pass
         return track
     
     async def refresh_stream_url(self, track: Track) -> Track:
@@ -191,15 +221,60 @@ class TrackService:
                     
                 # Найти скачанный файл
                 final_path = str(downloads_dir / f"{title}.mp3")
-                if os.path.exists(final_path):
-                    return final_path
+                if not os.path.exists(final_path):
+                    return None
+
+                # Вычислить canonical_key (sha256)
+                sha256 = hashlib.sha256()
+                with open(final_path, 'rb') as fh:
+                    for chunk in iter(lambda: fh.read(8192), b""):
+                        sha256.update(chunk)
+                canonical = sha256.hexdigest()
+
+                # Сохранить/записать в Storage (LocalStorage копирует в DOWNLOADS_DIR по умолчанию)
+                storage = get_storage()
+                # Use filename from final_path
+                dest_name = os.path.basename(final_path)
+                stored_path = storage.save_file(final_path, dest_name=dest_name)
+
+                # Create or reuse MediaAsset in DB (we will do DB-level operations outside thread)
+                return {
+                    'final_path': stored_path,
+                    'canonical': canonical,
+                }
                     
-                return None
             except Exception as e:
                 print(f"Error downloading audio: {e}")
                 return None
-        
-        return await asyncio.to_thread(_sync_download)
+        result = await asyncio.to_thread(_sync_download)
+        if not result:
+            return None
+
+        # DB operations: create or reuse MediaAsset
+        final_path = result['final_path']
+        canonical = result['canonical']
+
+        # Check existing asset
+        existing_asset = self.db.query(MediaAsset).filter(
+            MediaAsset.canonical_key == canonical
+        ).first()
+
+        if existing_asset:
+            media_asset = existing_asset
+        else:
+            size = os.path.getsize(final_path) if os.path.exists(final_path) else None
+            mime = mimetypes.guess_type(final_path)[0] if final_path else None
+            media_asset = MediaAsset(
+                storage_path=str(final_path),
+                size=size,
+                mime=mime,
+                canonical_key=canonical,
+            )
+            self.db.add(media_asset)
+            self.db.commit()
+            self.db.refresh(media_asset)
+
+        return {'local_path': final_path, 'media_asset_id': media_asset.id, 'canonical': canonical}
     
     def get_user_library(self, user_id: int, skip: int = 0, limit: int = 100) -> List[Dict]:
         """Получить библиотеку пользователя"""
@@ -224,6 +299,8 @@ class TrackService:
                     "thumbnail_url": track.thumbnail_url,
                     "source": track.source.value if hasattr(track.source, "value") else str(track.source),
                     "local_file_path": track.local_file_path,
+                    "processing_status": track.processing_status,
+                    "processing_progress": track.processing_progress,
                 },
                 "user_data": {
                     "added_at": user_track.added_at.isoformat(),
