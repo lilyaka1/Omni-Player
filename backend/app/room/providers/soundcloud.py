@@ -309,8 +309,12 @@ class SoundCloudClient:
             return None
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        target_file = output_dir / f"{filename_stem}.mp3"
 
+        # Skip FFmpegExtractAudio postprocessor — yt-dlp + ffmpeg 7.x trips on
+        # "unable to obtain file audio codec with ffprobe" for some sources.
+        # Save bestaudio in its native container (m4a/opus/mp3) — browsers and
+        # FileResponse handle all of these. Resolve the actual file from
+        # filename_stem.* after download.
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -318,24 +322,27 @@ class SoundCloudClient:
             'socket_timeout': 30,
             'outtmpl': str(output_dir / f"{filename_stem}.%(ext)s"),
             'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
         }
+
+        def _resolve_existing() -> Optional[Path]:
+            for p in sorted(output_dir.glob(f"{filename_stem}.*")):
+                if p.suffix.lower() in ('.mp3', '.m4a', '.opus', '.aac', '.ogg', '.webm'):
+                    if p.stat().st_size > 100 * 1024:
+                        return p
+            return None
 
         def _download_sync():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(track_url, download=True)
 
         try:
-            if target_file.exists() and target_file.stat().st_size > 100 * 1024:
+            existing = _resolve_existing()
+            if existing is not None:
                 # Уже есть полный файл — только метаданные подтянем
                 info = await self.get_track_info(track_url)
                 meta = info or {}
                 return {
-                    "path": str(target_file),
+                    "path": str(existing),
                     "title": meta.get("title", filename_stem),
                     "artist": meta.get("artist", "Unknown"),
                     "duration": meta.get("duration", 0),
@@ -343,20 +350,14 @@ class SoundCloudClient:
                     "genre": meta.get("genre", ""),
                 }
 
-            print(f"⬇️ [download] {track_url} → {target_file}")
+            print(f"⬇️ [download] {track_url} → {filename_stem}.*")
             info = await asyncio.to_thread(_download_sync)
             if not info:
                 return None
 
-            if not target_file.exists():
-                # yt-dlp мог положить файл с другим именем — найдём
-                produced = list(output_dir.glob(f"{filename_stem}.*"))
-                mp3s = [p for p in produced if p.suffix.lower() == ".mp3"]
-                if mp3s:
-                    target_file = mp3s[0]
-
-            if not target_file.exists() or target_file.stat().st_size < 100 * 1024:
-                print(f"❌ [download] file too small or missing: {target_file}")
+            target_file = _resolve_existing()
+            if target_file is None:
+                print(f"❌ [download] no audio file produced for {filename_stem}")
                 return None
 
             # Подгружаем thumbnail из info

@@ -106,10 +106,14 @@ _ALLOWED_TRANSITIONS = {
 }
 
 
-def update_playback_session(room_id: int, new_state: str, current_queue_item_id: Optional[int] = None, expected_end_at=None) -> Optional[PlaybackSession]:
+def update_playback_session(room_id: int, new_state: str, current_queue_item_id: Optional[int] = None, expected_end_at=None, force: bool = False) -> Optional[PlaybackSession]:
     """
     Atomically update/create PlaybackSession for a room with generation increment.
     Enforces allowed transitions and increments generation for each change.
+
+    force=True bypasses the transition guard — used by the authoritative
+    start_playback so a terminal session (stopped/failed/played) can be
+    restarted instead of staying stuck forever.
     Returns the updated session.
     """
     lock = _get_room_lock(room_id)
@@ -127,9 +131,9 @@ def update_playback_session(room_id: int, new_state: str, current_queue_item_id:
                 db.refresh(sess)
                 return sess
 
-            # Enforce allowed transitions
+            # Enforce allowed transitions (unless forced)
             cur = sess.playback_state or 'idle'
-            if new_state != cur:
+            if new_state != cur and not force:
                 allowed = _ALLOWED_TRANSITIONS.get(cur, [])
                 if new_state not in allowed:
                     # If transition not allowed, ignore request
@@ -181,6 +185,134 @@ def update_queue_state(room_track_id: int, new_state: str) -> bool:
         return True
     finally:
         db.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Track selection (queue_state based — no TrackAsset gate)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _select_ready_roomtrack(db, room_id: int, after_order=None, after_id=None, loop_mode: bool = False) -> Optional[RoomTrack]:
+    """
+    Pick the next playable RoomTrack for the room.
+
+    Selection is driven by RoomTrack.queue_state only — NOT by Track/TrackAsset.
+    With on-demand download the next track is fetched lazily when it becomes
+    current, so gating selection on a 'ready' asset would deadlock (a track can
+    never be selected because it was never downloaded, and is never downloaded
+    because it was never selected).
+
+    - normal mode: next item with queue_state in (ready, waiting_download),
+      ordered by order then id; restricted to items after the current one when
+      after_order/after_id is given. Returns None when the queue is exhausted.
+    - loop mode: round-robin by order ignoring queue_state — next by order after
+      the current item, wrapping to the first track of the room.
+    """
+    if loop_mode:
+        nxt = None
+        if after_order is not None:
+            nxt = (
+                db.query(RoomTrack)
+                .filter(RoomTrack.room_id == room_id, RoomTrack.order > after_order)
+                .order_by(RoomTrack.order)
+                .first()
+            )
+        elif after_id is not None:
+            nxt = (
+                db.query(RoomTrack)
+                .filter(RoomTrack.room_id == room_id, RoomTrack.id > after_id)
+                .order_by(RoomTrack.id)
+                .first()
+            )
+        if nxt:
+            return nxt
+        return (
+            db.query(RoomTrack)
+            .filter(RoomTrack.room_id == room_id)
+            .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
+            .first()
+        )
+
+    q = db.query(RoomTrack).filter(
+        RoomTrack.room_id == room_id,
+        RoomTrack.queue_state.in_(['ready', 'waiting_download']),
+    )
+    if after_order is not None:
+        q = q.filter(RoomTrack.order > after_order)
+    elif after_id is not None:
+        q = q.filter(RoomTrack.id > after_id)
+    return q.order_by(RoomTrack.order.nullsfirst(), RoomTrack.id).first()
+
+
+def ensure_track_and_asset(db, room_track: RoomTrack, local_path: str, info: Optional[dict] = None) -> Optional[int]:
+    """
+    Create/update the Track + TrackAsset(status='ready') 'downloaded' cache record
+    for a RoomTrack whose audio was just downloaded to local_path.
+
+    This is the record the stream endpoint prefers (TrackAsset.local_path) and the
+    canonical "this track is downloaded" marker of the room architecture.
+    Operates within the caller's db session and commits. Returns Track.id or None.
+    """
+    info = info or {}
+    src = room_track.source or 'soundcloud'
+    src_tid = room_track.source_track_id or ''
+    if not src_tid:
+        return None
+
+    duration = info.get('duration') or room_track.duration or 0
+
+    track = (
+        db.query(Track)
+        .filter(func.lower(Track.source) == func.lower(src), Track.source_track_id == src_tid)
+        .first()
+    )
+    if not track:
+        track = Track(
+            source=src,
+            source_track_id=src_tid,
+            source_page_url=src_tid,
+            title=room_track.title or info.get('title') or 'Unknown',
+            artist=room_track.artist or info.get('artist'),
+            duration=duration,
+            genre=room_track.genre or info.get('genre'),
+            stream_url=local_path,
+            stream_url_expires_at=datetime.utcnow() + timedelta(days=3650),
+            thumbnail_url=room_track.thumbnail or info.get('thumbnail'),
+            local_file_path=local_path,
+            processing_status='ready',
+        )
+        db.add(track)
+        db.flush()
+    else:
+        track.stream_url = local_path
+        track.local_file_path = local_path
+        track.stream_url_expires_at = datetime.utcnow() + timedelta(days=3650)
+        track.processing_status = 'ready'
+
+    asset = (
+        db.query(TrackAsset)
+        .filter(TrackAsset.track_id == track.id)
+        .order_by(TrackAsset.updated_at.desc())
+        .first()
+    )
+    if not asset:
+        asset = TrackAsset(
+            track_id=track.id,
+            source_type='local',
+            local_path=local_path,
+            mime='audio/mpeg',
+            duration=duration,
+            status='ready',
+        )
+        db.add(asset)
+    else:
+        asset.source_type = 'local'
+        asset.local_path = local_path
+        asset.mime = 'audio/mpeg'
+        asset.duration = duration
+        asset.status = 'ready'
+
+    db.commit()
+    return track.id
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -240,6 +372,18 @@ def start_playback(room_id: int) -> Optional[int]:
                     .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
                     .first()
                 )
+            # Fallback 2: pick any ready track even without stream_url
+            # (stream will be resolved at playback time via yt-dlp/provider)
+            if not first:
+                first = (
+                    db.query(RoomTrack)
+                    .filter(
+                        RoomTrack.room_id == room_id,
+                        RoomTrack.queue_state == 'ready',
+                    )
+                    .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
+                    .first()
+                )
             if not first:
                 return None
 
@@ -261,7 +405,7 @@ def start_playback(room_id: int) -> Optional[int]:
                 expected_end = None
 
             try:
-                update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end)
+                update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end, force=True)
             except Exception:
                 pass
 
@@ -299,50 +443,13 @@ def next_track(room_id: int) -> Optional[int]:
                 db.commit()
                 return start_playback(room_id)
 
-            # Find next candidate using deterministic selector (queue_state + ready asset)
+            # Find next candidate by queue_state (no Track/TrackAsset gate — see
+            # _select_ready_roomtrack). Loop policy handled inside the helper.
+            loop_mode = (room.queue_mode == 'loop')
             if current.order is not None:
-                next_row = (
-                    db.query(RoomTrack)
-                    .join(Track, and_(Track.source == RoomTrack.source, Track.source_track_id == RoomTrack.source_track_id))
-                    .join(TrackAsset, TrackAsset.track_id == Track.id)
-                    .filter(
-                        RoomTrack.room_id == room_id,
-                        RoomTrack.order > current.order,
-                        RoomTrack.queue_state.in_(['ready', 'waiting_download']),
-                        TrackAsset.status == 'ready',
-                    )
-                    .order_by(RoomTrack.order)
-                    .first()
-                )
+                next_row = _select_ready_roomtrack(db, room_id, after_order=current.order, loop_mode=loop_mode)
             else:
-                next_row = (
-                    db.query(RoomTrack)
-                    .join(Track, and_(Track.source == RoomTrack.source, Track.source_track_id == RoomTrack.source_track_id))
-                    .join(TrackAsset, TrackAsset.track_id == Track.id)
-                    .filter(
-                        RoomTrack.room_id == room_id,
-                        RoomTrack.id > current.id,
-                        RoomTrack.queue_state.in_(['ready', 'waiting_download']),
-                        TrackAsset.status == 'ready',
-                    )
-                    .order_by(RoomTrack.id)
-                    .first()
-                )
-
-            # Loop mode: if nothing found, consider loop policy
-            if not next_row and room.queue_mode == 'loop':
-                next_row = (
-                    db.query(RoomTrack)
-                    .join(Track, and_(Track.source == RoomTrack.source, Track.source_track_id == RoomTrack.source_track_id))
-                    .join(TrackAsset, TrackAsset.track_id == Track.id)
-                    .filter(
-                        RoomTrack.room_id == room_id,
-                        RoomTrack.queue_state.in_(['ready', 'waiting_download']),
-                        TrackAsset.status == 'ready',
-                    )
-                    .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-                    .first()
-                )
+                next_row = _select_ready_roomtrack(db, room_id, after_id=current.id, loop_mode=loop_mode)
 
             if next_row:
                 # mark previous as played
@@ -524,7 +631,7 @@ def ensure_playback_consistency(room_id: int) -> Optional[int]:
                 # If now_playing points to an item whose asset is failed, mark failed and advance
                 try:
                     t = db.query(Track).filter(
-                        Track.source == track.source,
+                        func.lower(Track.source) == func.lower(track.source),
                         Track.source_track_id == track.source_track_id,
                     ).first()
                     if t:
@@ -616,18 +723,7 @@ def playback_tick(room_id: int, recovery_timeout_seconds: int = 10, max_retries:
 
             # No session -> try to start playback INLINE
             if not sess:
-                first = (
-                    db.query(RoomTrack)
-                    .join(Track, and_(Track.source == RoomTrack.source, Track.source_track_id == RoomTrack.source_track_id))
-                    .join(TrackAsset, TrackAsset.track_id == Track.id)
-                    .filter(
-                        RoomTrack.room_id == room_id,
-                        RoomTrack.queue_state.in_(['ready', 'waiting_download']),
-                        TrackAsset.status == 'ready',
-                    )
-                    .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-                    .first()
-                )
+                first = _select_ready_roomtrack(db, room_id)
                 if not first:
                     return
 
@@ -740,27 +836,28 @@ def _inner_advance(db, room, room_id: int, sess: PlaybackSession) -> None:
     """
     current_item_id = sess.current_queue_item_id
 
-    # Mark current queue item with the session's terminal state
+    # Mark current queue item with the session's terminal state, remembering its
+    # position so we can pick the item that follows it.
+    cur_order = None
+    cur_id = None
     if current_item_id:
         try:
             rt = db.query(RoomTrack).filter(RoomTrack.id == current_item_id).first()
-            if rt and rt.queue_state not in ('played', 'failed'):
-                rt.queue_state = sess.playback_state
+            if rt:
+                cur_order = rt.order
+                cur_id = rt.id
+                if rt.queue_state not in ('played', 'failed'):
+                    rt.queue_state = sess.playback_state
         except Exception:
             pass
 
-    # Find next ready track in queue (same deterministic selector as start_playback)
-    first = (
-        db.query(RoomTrack)
-        .join(Track, and_(Track.source == RoomTrack.source, Track.source_track_id == RoomTrack.source_track_id))
-        .join(TrackAsset, TrackAsset.track_id == Track.id)
-        .filter(
-            RoomTrack.room_id == room_id,
-            RoomTrack.queue_state.in_(['ready', 'waiting_download']),
-            TrackAsset.status == 'ready',
-        )
-        .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-        .first()
+    # Find next track by queue_state (no Track/TrackAsset gate — see _select_ready_roomtrack).
+    loop_mode = (getattr(room, 'queue_mode', 'normal') == 'loop')
+    first = _select_ready_roomtrack(
+        db, room_id,
+        after_order=cur_order,
+        after_id=(cur_id if cur_order is None else None),
+        loop_mode=loop_mode,
     )
 
     if first:

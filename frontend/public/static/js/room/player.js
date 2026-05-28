@@ -45,16 +45,16 @@ const PlayerModule = (function () {
       if (isRoomMode()) {
         var streamAudio = document.getElementById('streamAudio');
         if (streamAudio && !streamAudio.paused && streamAudio.currentTime > 0) {
-          var pos = Number(streamAudio.currentTime) || 0;
-          var dur = Number(GLOBAL.currentDuration) || 0;
-          GLOBAL.currentPosition = pos;
-          updateProgress(pos, dur);
+          var _p = Number(streamAudio.currentTime) || 0;
+          var _d = Number(GLOBAL.currentDuration) || 0;
+          GLOBAL.currentPosition = _p;
+          updateProgress(_p, _d);
           return;
         }
       }
-      const duration = Number(GLOBAL.currentDuration || 0);
-      const pos = Number(GLOBAL.currentPosition || 0);
-      updateProgress(pos, duration);
+      const _dur = Number(GLOBAL.currentDuration || 0);
+      const _p2 = Number(GLOBAL.currentPosition || 0);
+      updateProgress(_p2, _dur);
     }, 250);
   }
 

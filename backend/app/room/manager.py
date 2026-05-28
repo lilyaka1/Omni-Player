@@ -208,14 +208,21 @@ class RoomManager:
                     t = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
                     if not t:
                         return None
-                    # NO-OP: do NOT persist local_path into RoomTrack.stream_url here.
-                    # Playability must be determined by TrackAsset.status == 'ready'.
                     saved_thumb = None
                     if new_thumb and not t.thumbnail:
                         t.thumbnail = new_thumb
                         saved_thumb = new_thumb
+                    # IMPORTANT: write local path into stream_url so stream endpoint uses it
+                    t.stream_url = local_path
                     room_id = t.room_id
                     db.commit()
+                    # Create/update the Track + TrackAsset(status='ready') cache record
+                    # — the canonical "downloaded" marker the stream endpoint prefers.
+                    try:
+                        from app.playback.controller import ensure_track_and_asset
+                        ensure_track_and_asset(db, t, local_path, info)
+                    except Exception as ae:
+                        print(f"⚠️ [prefetch] track {track_id}: asset record failed: {ae}")
                     return {"room_id": room_id, "thumb": saved_thumb}
                 finally:
                     db.close()

@@ -1,0 +1,129 @@
+
+# macOS
+.DS_Store
+# Thumbnails
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# pip / build
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+*.egg
+
+# Coverage / testing
+.pytest_cache/
+.cache
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+nosetests.xml
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Database
+*.sqlite3
+*.db
+*.sqlite
+
+# Jupyter
+.ipynb_checkpoints
+
+# System files
+Thumbs.db
+ehthumbs.db
+
+# Node / frontend
+node_modules/
+.pnp/
+.pnp.js
+dist/
+build/
+.vite/
+.turbo/
+/.cache
+
+# Vite / npm
+/.vite
+npm-debug.log*
+yarn.lock
+package-lock.json
+
+# Docker
+*.env
+.env.*
+docker-compose.override.yml.local
+
+# Secrets / keys
+*.pem
+*.key
+secrets.yml
+secrets.json
+
+# Uploaded/media and runtime outputs
+static/uploads/
+output/
+downloads/
+tts_audio/
+tts_models/
+wheels/
+
+# Binary / compiled
+*.so
+*.dylib
+*.dll
+
+# Temp
+tmp/
+temp/
+*.pid
+
+# Coverage reports
+coverage/
+
+# Misc
+*.swp
+*.swo
+
+# Ignore local IDE/session/state files
+.session
+

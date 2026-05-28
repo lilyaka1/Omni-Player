@@ -125,6 +125,7 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
 
     # ── FIX #3: Send FULL snapshot (queue + now_playing) on join ─────────────────
     def _build_snapshot():
+        from datetime import datetime
         _db = SessionLocal()
         try:
             room = _db.query(Room).filter(Room.id == room_id).first()
@@ -143,6 +144,17 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                     RoomTrack.id == room.now_playing_track_id
                 ).first()
 
+            # Calculate elapsed position for accurate client-side timing
+            position = 0.0
+            started_at_epoch = None
+            if room.playback_started_at and now_playing:
+                position = (datetime.utcnow() - room.playback_started_at).total_seconds()
+                position = min(position, now_playing.duration or 0)
+                try:
+                    started_at_epoch = int(room.playback_started_at.timestamp())
+                except Exception:
+                    started_at_epoch = None
+
             return {
                 "current_track": {
                     "id": now_playing.id,
@@ -151,6 +163,7 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                     "duration": now_playing.duration or 0,
                     "thumbnail": now_playing.thumbnail or "",
                     "genre": now_playing.genre or "",
+                    "started_at": started_at_epoch,
                 } if now_playing else None,
                 "queue": [
                     {
@@ -165,9 +178,8 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                     for t in queue
                 ],
                 "is_playing": bool(room.now_playing_track_id),
-                "playback_started_at": (
-                    room.playback_started_at.isoformat() if room.playback_started_at else None
-                ),
+                "position": position,
+                "playback_started_at": started_at_epoch,
             }
         finally:
             _db.close()
@@ -335,7 +347,10 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
             try:
                 room = _db.query(Room).filter(Room.id == room_id).first()
                 if room and room.playback_started_at:
-                    return room.playback_started_at.isoformat()
+                    try:
+                        return int(room.playback_started_at.timestamp())
+                    except Exception:
+                        return None
                 return None
             finally:
                 _db.close()

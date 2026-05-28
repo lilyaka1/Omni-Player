@@ -14,9 +14,18 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 @router.get("/room/{room_id}/stream")
 async def stream_endpoint(room_id: int, db: Session = Depends(get_db)):
     """
-    Тупой файл-читатель.
+    On-demand audio source for a room.
     INPUT: room.now_playing_track_id
-    OUTPUT: FileResponse | StreamingResponse | 404
+    OUTPUT: FileResponse (local mp3) | 404
+
+    Resolution order:
+      1. TrackAsset.local_path (status='ready') — canonical "downloaded" record
+      2. RoomTrack.stream_url if it points to an existing local file
+      3. download via room_manager.prefetch_track_file (creates TrackAsset),
+         then serve the resulting file
+      4. 404
+    Stale remote URLs (e.g. expired SoundCloud CDN signatures) are NOT proxied —
+    the architecture serves only locally-cached files.
     """
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
@@ -29,18 +38,16 @@ async def stream_endpoint(room_id: int, db: Session = Depends(get_db)):
     if not track:
         raise HTTPException(status_code=404, detail="Track not found")
 
-    # Prefer TrackAsset.local_path for serving audio. Only serve assets in 'ready' state.
-    # Try Track/TrackAsset first (case-insensitive source match)
     from app.database.models import Track, TrackAsset
     from sqlalchemy import func
 
-    track_model = db.query(Track).filter(
-        func.lower(Track.source) == func.lower(track.source),
-        Track.source_track_id == track.source_track_id
-    ).first()
-
     file_path = None
 
+    # 1. Prefer TrackAsset.local_path
+    track_model = db.query(Track).filter(
+        func.lower(Track.source) == func.lower(track.source),
+        Track.source_track_id == track.source_track_id,
+    ).first()
     if track_model:
         asset = (
             db.query(TrackAsset)
@@ -53,25 +60,28 @@ async def stream_endpoint(room_id: int, db: Session = Depends(get_db)):
             if fp.is_file():
                 file_path = fp
 
-    # Fallback: use RoomTrack.stream_url directly (SoundCloud CDN URL or local path)
-    if not file_path and track.stream_url:
-        if track.stream_url.startswith('http://') or track.stream_url.startswith('https://'):
-            # Remote URL — proxy via httpx StreamingResponse
-            import httpx
-            try:
-                headers = {"User-Agent": "Mozilla/5.0"}
-                r = httpx.get(track.stream_url, headers=headers, follow_redirects=True, timeout=10.0)
-                r.raise_for_status()
-                return StreamingResponse(
-                    r.iter_bytes(chunk_size=65536),
-                    media_type=r.headers.get("content-type", "audio/mpeg"),
-                    headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
-                )
-            except Exception as e:
-                print(f"❌ Stream proxy error: {e}")
-                raise HTTPException(status_code=502, detail="Upstream stream unavailable")
-        else:
-            fp = Path(track.stream_url)
+    # 2. Fallback: RoomTrack.stream_url pointing to an existing local file
+    if not file_path and track.stream_url and not (
+        track.stream_url.startswith('http://') or track.stream_url.startswith('https://')
+    ):
+        fp = Path(track.stream_url)
+        if fp.is_file():
+            file_path = fp
+
+    # 3. Fallback: download on demand
+    if not file_path:
+        from app.room.manager import room_manager
+        from app.room.providers.soundcloud import soundcloud_client
+        from app.database.session import SessionLocal
+        local_path = await room_manager.prefetch_track_file(
+            track.id,
+            track.source,
+            track.source_track_id,
+            SessionLocal,
+            soundcloud_client,
+        )
+        if local_path:
+            fp = Path(local_path)
             if fp.is_file():
                 file_path = fp
 
@@ -149,18 +159,39 @@ async def room_queue(room_id: int, db: Session = Depends(get_db)):
 @router.post("/room/{room_id}/start")
 async def room_start(room_id: int, db: Session = Depends(get_db)):
     """Start playback - stub for frontend compatibility."""
+    from app.playback.controller import start_playback
+
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
-    return JSONResponse({"ok": True, "room_id": room_id})
+
+    started = None
+    try:
+        started = start_playback(room_id)
+    except Exception as e:
+        print(f"❌ room_start error: {e}")
+
+    if not started:
+        # No playable track / nothing started
+        return JSONResponse({"ok": False, "reason": "no_ready_track"}, status_code=404)
+
+    return JSONResponse({"ok": True, "room_id": room_id, "now_playing": started})
 
 
 @router.post("/room/{room_id}/stop")
 async def room_stop(room_id: int, db: Session = Depends(get_db)):
     """Stop playback - stub for frontend compatibility."""
+    from app.playback.controller import stop_playback
+
     room = db.query(Room).filter(Room.id == room_id).first()
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+
+    try:
+        stop_playback(room_id)
+    except Exception as e:
+        print(f"❌ room_stop error: {e}")
+
     return JSONResponse({"ok": True, "room_id": room_id})
 
 

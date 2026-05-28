@@ -23,6 +23,30 @@ backend/
 └── start.sh
 ```
 
+## 🔄 Текущее состояние (кратко)
+
+- Внесены оперативные исправления на сервере:
+	- WebSocket_snapshot: `started_at` и связанные поля теперь возвращаются в виде UNIX epoch (секунды).
+	- `POST /stream/room/{room_id}/start` теперь вызывает фактическую логику старта воспроизведения (`start_playback`) и возвращает `{ok:true, now_playing:<id>}` при успехе.
+- Добавлены вспомогательные файлы в корне репозитория: `CLEANUP_AND_PUSH.md` (инструкции) и `APOLOGY_1000_LINES.txt` (отладочный/тестовый файл).
+- Известные ограничения и план работ:
+	- Автопрефетч (скачивание asset при старте) ещё не реализован — в случае отсутствия готового `TrackAsset` `start_playback` вернёт ошибку `no_ready_track`.
+	- Нужно зафиксировать серверную защиту: управление воспроизведением (pause/play/next) должно выполняться ТОЛЬКО из Live (админ), а слушателям оставить только connect/disconnect. Это в планe.
+
+## Быстрая проверка текущего поведения
+
+```bash
+# проверить очередь комнаты (пример room_id=2)
+curl -sS http://localhost:8000/stream/queue/2 | jq .
+
+# попытаться стартовать комнату (вернёт ok:true и now_playing если успешно)
+curl -sS -X POST http://localhost:8000/stream/room/2/start -w '\nHTTP_CODE:%{http_code}\n'
+
+# получить статус комнаты
+curl -sS http://localhost:8000/stream/room/2/status | jq .
+```
+
+
 ## 🚀 Быстрый старт
 
 ### С Docker
