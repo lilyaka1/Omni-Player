@@ -127,3 +127,4 @@ coverage/
 # Ignore local IDE/session/state files
 .session
 
+backend/tts_models/*.onnx
