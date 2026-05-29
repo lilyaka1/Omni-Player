@@ -68,8 +68,10 @@ async def lifespan(app: FastAPI):
     try:
         from app.voice_inserts.tts import prewarm_cache
         from app.voice_inserts.queue import insert_timeout_checker
+        from app.playback.sync import sync_service
         asyncio.create_task(prewarm_cache())
         asyncio.create_task(insert_timeout_checker())
+        sync_service.start()
         # start ingestion worker
         # Ingest worker disabled to avoid schema issues in this setup.
         # Uncomment the following lines if the database schema is fully migrated.
@@ -87,6 +89,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── Shutdown ────────────────────────────────────────────────────────────
+    try:
+        from app.playback.sync import sync_service
+        sync_service.stop()
+    except Exception:
+        pass
     logger.info("🛑 Omni Player API shutting down...")
 
 
@@ -134,4 +141,9 @@ _register("Stream", "app.stream.router")
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
+    return {"status": "ok", "version": "1.0.0"}
+
+
+@app.get("/health")
+async def legacy_health():
     return {"status": "ok", "version": "1.0.0"}

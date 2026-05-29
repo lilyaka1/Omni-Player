@@ -339,6 +339,28 @@ def start_playback(room_id: int) -> Optional[int]:
                 return None
 
             if room.now_playing_track_id is not None:
+                if not room.is_playing:
+                    room.is_playing = True
+                    if not room.playback_started_at:
+                        room.playback_started_at = datetime.utcnow()
+                    db.commit()
+
+                    try:
+                        update_playback_session(room_id, 'playing', current_queue_item_id=room.now_playing_track_id, force=True)
+                    except Exception:
+                        pass
+
+                    try:
+                        from app.playback.timeline import timeline_manager
+                        state = timeline_manager.get_current_state(room_id)
+                        if state and state.track_id == room.now_playing_track_id:
+                            timeline_manager.resume(room_id)
+                        else:
+                            timeline_manager.start_track(room_id, room.now_playing_track_id)
+                    except Exception:
+                        pass
+
+                    on_playback_event(room_id, "resumed", {"track_id": room.now_playing_track_id})
                 return room.now_playing_track_id
 
             # Deterministic selector: pick next queue item where queue_state
@@ -532,6 +554,30 @@ def set_now_playing(room_id: int, track_id: int) -> bool:
             room.is_playing = True
             room.playback_started_at = datetime.utcnow()
             db.commit()
+
+            expected_end = None
+            try:
+                track = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
+                if track:
+                    expected_end = datetime.utcnow() + timedelta(seconds=int(track.duration or 0))
+            except Exception:
+                expected_end = None
+
+            try:
+                update_queue_state(track_id, 'playing')
+            except Exception:
+                pass
+
+            try:
+                update_playback_session(room_id, 'playing', current_queue_item_id=track_id, expected_end_at=expected_end, force=True)
+            except Exception:
+                pass
+
+            try:
+                from app.playback.timeline import timeline_manager
+                timeline_manager.start_track(room_id, track_id)
+            except Exception:
+                pass
 
             on_playback_event(room_id, "set", {
                 "track_id": track_id,
@@ -773,17 +819,29 @@ def playback_tick(room_id: int, recovery_timeout_seconds: int = 10, max_retries:
                     return
 
                 # Expected end handling
-                if sess.expected_end_at:
+                now = datetime.utcnow()
+                expected_end = sess.expected_end_at
+                if expected_end is None:
                     try:
-                        now = datetime.utcnow()
-                        if now >= sess.expected_end_at:
-                            rt.queue_state = 'played'
-                            sess.playback_state = 'played'
-                            db.commit()
-                            _inner_advance(db, room, room_id, sess)
-                            return
+                        from app.playback.timeline import timeline_manager
+                        timeline_state = timeline_manager.get_current_state(room_id)
+                        elapsed = timeline_state.get_position() if timeline_state else None
+                        if elapsed is None and room.playback_started_at:
+                            elapsed = (now - room.playback_started_at).total_seconds()
+                        duration = float(rt.duration or 0)
+                        if elapsed is not None and duration > 0 and elapsed >= duration:
+                            expected_end = now
                     except Exception:
                         pass
+
+                if expected_end and now >= expected_end:
+                    rt.queue_state = 'played'
+                    sess.playback_state = 'played'
+                    if sess.expected_end_at is None:
+                        sess.expected_end_at = now
+                    db.commit()
+                    _inner_advance(db, room, room_id, sess)
+                    return
 
             # If stalled -> attempt recovery policies
             if sess.playback_state == 'stalled':

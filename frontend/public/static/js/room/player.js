@@ -38,6 +38,49 @@ const PlayerModule = (function () {
     return '';
   }
 
+  function syncRoomStreamPosition(streamAudio, position, trackId) {
+    if (!streamAudio) return;
+
+    var numericPosition = Number(position);
+    if (!Number.isFinite(numericPosition) || numericPosition < 0) return;
+
+    var applySeek = function () {
+      try {
+        var duration = Number(streamAudio.duration);
+        var target = numericPosition;
+        if (Number.isFinite(duration) && duration > 0) {
+          target = Math.max(0, Math.min(numericPosition, Math.max(0, duration - 0.25)));
+        }
+        if (Math.abs((Number(streamAudio.currentTime) || 0) - target) > 0.25) {
+          streamAudio.currentTime = target;
+        }
+        GLOBAL.currentPosition = target;
+        window._pendingRoomStreamSeek = null;
+      } catch (err) {
+        window._pendingRoomStreamSeek = { trackId: trackId, position: numericPosition };
+      }
+    };
+
+    if (streamAudio.readyState >= 1) {
+      applySeek();
+      return;
+    }
+
+    window._pendingRoomStreamSeek = { trackId: trackId, position: numericPosition };
+    if (streamAudio.__roomSeekListenerBound) return;
+
+    var flushPendingSeek = function () {
+      var pending = window._pendingRoomStreamSeek;
+      if (!pending) return;
+      if (pending.trackId && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== Number(pending.trackId)) return;
+      applySeek();
+    };
+
+    streamAudio.addEventListener('loadedmetadata', flushPendingSeek);
+    streamAudio.addEventListener('canplay', flushPendingSeek);
+    streamAudio.__roomSeekListenerBound = true;
+  }
+
   function ensureProgressTicker() {
     if (_progressTimer) return;
     _progressTimer = setInterval(() => {
@@ -162,6 +205,7 @@ const PlayerModule = (function () {
     const prevId = GLOBAL.currentTrack && GLOBAL.currentTrack.id;
     const incomingId = track.id;
     const trackChanged = !prevId || prevId !== incomingId;
+    const shouldPlay = data?.is_playing !== false;
 
     GLOBAL.currentTrack = track;
     GLOBAL.currentDuration = Number(track.duration || 0) || 0;
@@ -178,25 +222,39 @@ const PlayerModule = (function () {
     if (isRoomMode()) {
       var streamAudio = document.getElementById('streamAudio');
       var url = getRoomStreamUrl();
+        var absUrl = new URL(url, window.location.href).href;
+      var serverPosition = Number(data?.position);
       if (streamAudio) {
-        if (streamAudio.src !== url || trackChanged) {
+          if (streamAudio.src !== absUrl || trackChanged) {
           streamAudio.pause();
-          streamAudio.src = url;
+            streamAudio.src = absUrl;
           streamAudio.load();
+        }
+        if (Number.isFinite(serverPosition) && serverPosition >= 0) {
+          syncRoomStreamPosition(streamAudio, serverPosition, incomingId);
+        }
+        if (shouldPlay) {
           streamAudio.play().catch(function (err) {
             if (err && err.name === 'NotAllowedError') {
               window._pendingStreamUrl = url;
               if (typeof window.showPlayPrompt === 'function') window.showPlayPrompt();
             }
           });
+        } else {
+          streamAudio.pause();
         }
       } else {
-        // stream.js ещё не создал элемент — попросим
-        autoConnectStream();
+        // stream.js ещё не создал элемент — попросим только если надо играть.
+        if (Number.isFinite(serverPosition) && serverPosition >= 0) {
+          window._pendingRoomStreamSeek = { trackId: incomingId, position: serverPosition };
+        }
+        if (shouldPlay) {
+          autoConnectStream();
+        }
       }
-      GLOBAL.isPlaying = true;
-      setPlayIcon(true);
-      artworkContainer?.classList.add('spinning');
+      GLOBAL.isPlaying = shouldPlay;
+      setPlayIcon(shouldPlay);
+      artworkContainer?.classList.toggle('spinning', shouldPlay);
       return;
     }
 
@@ -211,7 +269,7 @@ const PlayerModule = (function () {
         if (!src) { showToast('У трека нет stream URL', 'error'); return; }
         var abs = new URL(src, window.location.href).href;
         if (audio.src !== abs || trackChanged) {
-          audio.src = src;
+            audio.src = abs;
           audio.load();
         }
         audio.play().catch(() => {});
@@ -275,15 +333,25 @@ const PlayerModule = (function () {
         showToast('Управление доступно только для админа', 'error');
         return;
       }
-      // В radio mode нет local play/pause — всё решает now_playing_track_id на бэкенде.
-      // Просто переключаем стрим (connect/disconnect).
       var streamAudio = document.getElementById('streamAudio');
       if (streamAudio && !streamAudio.paused && streamAudio.src) {
         streamAudio.pause();
         GLOBAL.isPlaying = false;
         setPlayIcon(false);
+        artworkContainer?.classList.remove('spinning');
+        WSModule.sendWS('playback_control', { action: 'pause' });
       } else {
-        autoConnectStream();
+        WSModule.sendWS('playback_control', { action: 'play' });
+        if (streamAudio && streamAudio.src) {
+          streamAudio.play().catch(function (err) {
+            if (err && err.name === 'NotAllowedError') {
+              window._pendingStreamUrl = streamAudio.src;
+              if (typeof window.showPlayPrompt === 'function') window.showPlayPrompt();
+            }
+          });
+        } else {
+          autoConnectStream();
+        }
       }
       return;
     }

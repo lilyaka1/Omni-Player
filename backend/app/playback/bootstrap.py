@@ -90,6 +90,27 @@ def join_room_and_start_sync(room_id: int, user_id: Optional[int] = None) -> Boo
                     timeline_state = timeline_manager.start_track(room_id, track_id)
                 if timeline_state is not None:
                     print(f"⏱️ [bootstrap] Room {room_id}: loop started for track {track_id}")
+                try:
+                    from app.database.models import RoomTrack
+                    track = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
+                    if track:
+                        from app.playback.controller import update_playback_session
+                        expected_end = None
+                        try:
+                            elapsed = None
+                            room_fresh = db.query(Room).filter(Room.id == room_id).first()
+                            if room_fresh and room_fresh.playback_started_at:
+                                elapsed = (datetime.utcnow() - room_fresh.playback_started_at.replace(tzinfo=None)).total_seconds()
+                            if elapsed is not None and track.duration:
+                                remaining = max(0, float(track.duration) - float(elapsed))
+                                expected_end = datetime.utcnow() + timedelta(seconds=remaining)
+                            elif track.duration:
+                                expected_end = datetime.utcnow() + timedelta(seconds=float(track.duration))
+                        except Exception:
+                            expected_end = None
+                        update_playback_session(room_id, 'playing', current_queue_item_id=track_id, expected_end_at=expected_end, force=True)
+                except Exception:
+                    pass
                 actions.append("timeline_started")
             except Exception as e:
                 errors.append(f"timeline start failed: {e}")

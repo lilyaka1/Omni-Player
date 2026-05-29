@@ -7,6 +7,7 @@ var _currentRoomId = null;
 var _streamAudio = null;
 var _streamConnectInFlight = false;
 var _streamConnectUrl = '';
+var _streamEndAdvanceRequestedAt = 0;
 
 // ── Audio элемент ─────────────────────────────────────────────────────────────
 function _getOrCreateStreamAudio() {
@@ -24,6 +25,32 @@ function _getOrCreateStreamAudio() {
   });
   _streamAudio.addEventListener('ended', function () {
     console.log('ℹ️ streamAudio ended');
+    if (!GLOBAL || !GLOBAL.roomId || !GLOBAL.currentTrack) return;
+    var now = Date.now();
+    if (now - _streamEndAdvanceRequestedAt < 4000) return;
+    _streamEndAdvanceRequestedAt = now;
+    if (typeof WSModule !== 'undefined' && WSModule && typeof WSModule.sendWS === 'function') {
+      WSModule.sendWS('playback_control', { action: 'next' });
+    }
+  });
+  _streamAudio.addEventListener('loadedmetadata', function () {
+    var pending = window._pendingRoomStreamSeek;
+    if (!pending) return;
+    if (pending.trackId && GLOBAL && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== Number(pending.trackId)) return;
+    try {
+      var duration = Number(_streamAudio.duration);
+      var target = Number(pending.position);
+      if (Number.isFinite(duration) && duration > 0) {
+        target = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
+      }
+      if (Math.abs((Number(_streamAudio.currentTime) || 0) - target) > 0.25) {
+        _streamAudio.currentTime = target;
+      }
+      GLOBAL.currentPosition = target;
+      window._pendingRoomStreamSeek = null;
+    } catch (err) {
+      console.warn('⚠️ streamAudio seek failed:', err);
+    }
   });
   console.log('✅ streamAudio element created');
   return _streamAudio;

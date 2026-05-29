@@ -117,6 +117,13 @@
         GLOBAL.currentUser.is_admin
       )) {
         GLOBAL.userRole = 'owner';
+        const adminBtn = document.getElementById('roomAdminBtn');
+        if (adminBtn) adminBtn.style.display = 'inline-flex';
+      }
+
+      if (GLOBAL.currentUser && GLOBAL.currentUser.role === 'admin') {
+        const adminBtn = document.getElementById('roomAdminBtn');
+        if (adminBtn) adminBtn.style.display = 'inline-flex';
       }
 
       // Загрузить список слушателей

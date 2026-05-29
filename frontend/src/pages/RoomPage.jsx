@@ -135,6 +135,15 @@ export default function RoomPage() {
         </button>
         <div className="topbar-title" id="roomNameTitle">Загрузка...</div>
         <div className="topbar-online"><div className="online-dot" /><span id="onlineCount">0</span> online</div>
+        <button
+          className="eq-toggle-btn glass-tertiary"
+          id="roomAdminBtn"
+          style={{ display: 'none' }}
+          onClick={() => { window.location.href = `/live?room_id=${roomId || ''}`; }}
+          title="Открыть панель управления комнатой"
+        >
+          <i className="fa-solid fa-shield-halved" /> Admin
+        </button>
         <button className="eq-toggle-btn glass-tertiary" id="eqToggleBtn"><i className="fa-solid fa-sliders" /> EQ</button>
         <button className="topbar-back glass-tertiary" id="themeToggle" title="Переключить тему"><i className="fa-solid fa-moon" id="themeIcon" /></button>
       </div>

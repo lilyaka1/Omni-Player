@@ -200,6 +200,14 @@ async def upload_local_files(
         try:
             from app.services.ingest_state import complete_success
             complete_success(track.id, str(stored_path), None, None)
+            # Keep the current session in sync with the background finalization.
+            # `complete_success()` writes from a separate session, but this route
+            # still holds a stale `track` instance marked as `processing`. If we
+            # leave it unchanged, the final `db.commit()` below can overwrite the
+            # ready state back to processing.
+            track.local_file_path = str(stored_path)
+            track.processing_status = 'ready'
+            track.processing_progress = 100
         except Exception:
             # fallback: do NOT set track.stream_url or processing_status here.
             # Instead try to create a TrackAsset marking the file as ready so
@@ -207,6 +215,9 @@ async def upload_local_files(
             try:
                 from app.database.models import TrackAsset
                 db.add(TrackAsset(track_id=track.id, local_path=str(stored_path), status='ready'))
+                track.local_file_path = str(stored_path)
+                track.processing_status = 'ready'
+                track.processing_progress = 100
                 db.commit()
             except Exception:
                 db.rollback()

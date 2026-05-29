@@ -20,6 +20,14 @@ const ChatModule = (function () {
     } catch {}
   }
 
+  function normalizeMessagePayload(raw) {
+    if (!raw || typeof raw !== 'object') return raw;
+    if (raw.data && typeof raw.data === 'object') {
+      return raw.data;
+    }
+    return raw;
+  }
+
   function restoreMessages() {
     try {
       const raw = localStorage.getItem(storageKey());
@@ -46,7 +54,7 @@ const ChatModule = (function () {
 
   function setHistory(list) {
     if (!Array.isArray(list)) return;
-    const normalized = list.slice(-MAX_MESSAGES);
+    const normalized = list.slice(-MAX_MESSAGES).map(normalizeMessagePayload);
     _messages = normalized;
 
     _seenMessageIds.clear();
@@ -110,6 +118,7 @@ const ChatModule = (function () {
   // ---- Вставить сообщение ----
 
   function appendMessage(data) {
+    data = normalizeMessagePayload(data);
     const id = data && (typeof data.id === 'number' || typeof data.id === 'string') ? String(data.id) : null;
     if (id && _seenMessageIds.has(id)) {
       return;
@@ -123,6 +132,7 @@ const ChatModule = (function () {
   }
 
   function renderMessage(data) {
+    data = normalizeMessagePayload(data);
     const container = document.getElementById('chatMessages');
     if (!container) return;
 
@@ -130,9 +140,9 @@ const ChatModule = (function () {
     const emptyState = container.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
-    const author = data.user || data.username || 'Аноним';
+    const author = data.display_name || data.user || data.username || data.author || 'Аноним';
     const text = data.content || data.message || '';
-    const isMine = GLOBAL.currentUser && author === GLOBAL.currentUser.username;
+    const isMine = GLOBAL.currentUser && [GLOBAL.currentUser.username, GLOBAL.currentUser.display_name].filter(Boolean).includes(author);
 
     const time = data.timestamp
       ? new Date(data.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })

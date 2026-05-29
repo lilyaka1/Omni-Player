@@ -155,6 +155,16 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                 except Exception:
                     started_at_epoch = None
 
+            is_playing = bool(getattr(room, 'is_playing', False))
+            try:
+                from app.playback.timeline import timeline_manager
+                timeline_state = timeline_manager.get_current_state(room_id)
+                if timeline_state:
+                    position = round(timeline_state.get_position(), 3)
+                    is_playing = bool(timeline_state.is_playing)
+            except Exception:
+                pass
+
             return {
                 "current_track": {
                     "id": now_playing.id,
@@ -177,7 +187,7 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                     }
                     for t in queue
                 ],
-                "is_playing": bool(room.now_playing_track_id),
+                "is_playing": is_playing,
                 "position": position,
                 "playback_started_at": started_at_epoch,
             }
@@ -390,6 +400,16 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
             room = _db.query(Room).filter(Room.id == room_id).first()
             if not room:
                 return {"ok": False, "reason": "room_not_found"}
+            if track_id:
+                try:
+                    requested_id = int(track_id)
+                except Exception:
+                    requested_id = None
+                if requested_id and room.now_playing_track_id != requested_id:
+                    from app.playback.controller import set_now_playing
+                    if not set_now_playing(room_id, requested_id):
+                        return {"ok": False, "reason": "track_not_found"}
+                    return {"ok": True, "now_playing_track_id": requested_id}
             try:
                 from app.playback.controller import start_playback
                 started_id = start_playback(room_id)
@@ -432,19 +452,48 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
             return
         print(f"✅ [PLAYBACK] MVP: now_playing_track_id={res['now_playing_track_id']}")
 
+        room_state = await asyncio.to_thread(_db_state)
+        ct = room_state.get("current_track")
+        payload = {"current_track": ct, "is_playing": bool(room_state.get("is_playing", False)), "position": room_state.get("position", 0)}
+        await manager.broadcast_event(room_id, 'room_state', payload)
+        if ct:
+            await manager.broadcast_event(room_id, 'track_change', {"current_track": ct, "track": ct, "is_playing": bool(room_state.get("is_playing", False)), "position": room_state.get("position", 0)})
+        return
+
     elif action == "pause":
-        # В radio mode pause не нужен — фронт управляет только стримом.
-        # Сброс playback_started_at чтобы stream endpoint дал 404.
+        def _db_pause():
+            _db = SessionLocal()
+            try:
+                room = _db.query(Room).filter(Room.id == room_id).with_for_update().first()
+                if not room:
+                    return {"ok": False, "reason": "room_not_found"}
+                room.is_playing = False
+                _db.commit()
+                return {"ok": True}
+            finally:
+                _db.close()
+
         try:
-            from app.playback.controller import stop_playback
-            await asyncio.to_thread(stop_playback, room_id)
+            from app.playback.timeline import timeline_manager
+            timeline_manager.pause(room_id)
         except Exception:
             pass
-        await manager.broadcast_event(room_id, 'room_state', {"current_track": None})
+
+        pause_res = await asyncio.to_thread(_db_pause)
+        if not pause_res.get("ok"):
+            print(f"❌ [PLAYBACK] Room {room_id}: pause failed - {pause_res.get('reason')}")
+            return
+
+        room_state = await asyncio.to_thread(_db_state)
+        ct = room_state.get("current_track")
+        payload = {"current_track": ct, "is_playing": False, "position": room_state.get("position", 0)}
+        await manager.broadcast_event(room_id, 'room_state', payload)
+        if ct:
+            await manager.broadcast_event(room_id, 'track_change', {"current_track": ct, "track": ct, "is_playing": False, "position": room_state.get("position", 0)})
         return
 
     room_state = await asyncio.to_thread(_db_state)
-    await manager.broadcast_event(room_id, 'room_state', {"current_track": room_state.get("current_track")})
+    await manager.broadcast_event(room_id, 'room_state', {"current_track": room_state.get("current_track"), "is_playing": bool(room_state.get("is_playing", False)), "position": room_state.get("position", 0)})
 
     if room_state.get("current_track"):
         ct = room_state["current_track"]
@@ -456,7 +505,7 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
             "thumbnail": ct.get("thumbnail") or "",
             "genre": ct.get("genre") or "",
         }
-        await manager.broadcast_event(room_id, 'track_changed', {"track": track_dict})
+        await manager.broadcast_event(room_id, 'track_changed', {"track": track_dict, "is_playing": bool(room_state.get("is_playing", False)), "position": room_state.get("position", 0)})
 
 
 # -- Reorder queue --

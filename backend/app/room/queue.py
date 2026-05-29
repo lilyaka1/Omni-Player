@@ -12,6 +12,10 @@ def get_room_state(db, room) -> dict:
     """Текущее состояние воспроизведения комнаты."""
     from app.database.models import RoomTrack, Track, TrackAsset
     from app.database.models import PlaybackSession
+    try:
+        from app.playback.timeline import timeline_manager
+    except Exception:
+        timeline_manager = None
 
     if not room.now_playing_track_id:
         current = None
@@ -29,7 +33,16 @@ def get_room_state(db, room) -> dict:
 
     track = current
     elapsed = 0.0
-    if room.playback_started_at and track:
+    timeline_state = None
+    if timeline_manager is not None:
+        try:
+            timeline_state = timeline_manager.get_current_state(room.id)
+        except Exception:
+            timeline_state = None
+
+    if timeline_state and track:
+        elapsed = min(timeline_state.get_position(), track.duration or 0)
+    elif room.playback_started_at and track:
         elapsed = (datetime.utcnow() - room.playback_started_at).total_seconds()
         elapsed = min(elapsed, track.duration or 0)
 
@@ -92,7 +105,7 @@ def get_room_state(db, room) -> dict:
         "position": elapsed,
         "server_time": datetime.utcnow().isoformat(),
         "queue": queue,
-        "is_playing": bool(getattr(room, 'is_playing', False)),
+        "is_playing": bool(timeline_state.is_playing if timeline_state is not None else getattr(room, 'is_playing', False)),
         "playback_session": session_dict,
     }
 
