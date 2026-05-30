@@ -174,9 +174,12 @@
       const isOwner = u.id === ownerId;
       const roleLabel = isOwner ? 'Host' : 'User';
       const roleClass = isOwner ? 'role-owner' : 'role-user';
+      const avatarContent = u.avatar_url 
+        ? `<img src="${u.avatar_url}" alt="" style="width: 100%; height: 100%; object-fit: cover;">` 
+        : escHtml((u.username || '?')[0].toUpperCase());
       return `
         <div class="listener-item">
-          <div class="listener-avatar">${escHtml((u.username || '?')[0].toUpperCase())}</div>
+          <div class="listener-avatar">${avatarContent}</div>
           <div class="listener-name">${escHtml(u.username || 'Аноним')}</div>
           <span class="listener-role ${roleClass}">${roleLabel}</span>
         </div>

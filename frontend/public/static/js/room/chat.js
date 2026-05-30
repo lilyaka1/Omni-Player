@@ -10,6 +10,21 @@ const ChatModule = (function () {
   const _seenMessageIds = new Set();
   const MAX_MESSAGES = 100;
 
+  // Helper: Get fresh user data with avatar
+  async function getCurrentUserWithAvatar() {
+    try {
+      const res = await fetch('/auth/me', {
+        headers: { 'Authorization': `Bearer ${GLOBAL.token}` }
+      });
+      if (res.ok) {
+        const userData = await res.json();
+        GLOBAL.currentUser = userData;
+        return userData;
+      }
+    } catch {}
+    return GLOBAL.currentUser;
+  }
+
   function storageKey() {
     return `room-chat-${GLOBAL.roomId || 'unknown'}`;
   }
@@ -109,10 +124,23 @@ const ChatModule = (function () {
       return;
     }
 
-    const sent = WSModule.sendWS('chat', { content: msg });
-    if (sent) {
-      input.value = '';
-    }
+    // Get fresh user data to ensure avatar_url is included
+    getCurrentUserWithAvatar().then(userData => {
+      const payload = { content: msg };
+      // Add avatar_url if available
+      if (userData?.avatar_url) {
+        payload.avatar_url = userData.avatar_url;
+        console.log('✅ Adding avatar_url to payload:', payload.avatar_url);
+      } else {
+        console.log('❌ No avatar_url in userData:', userData);
+      }
+      console.log('📤 Sending chat payload:', payload);
+
+      const sent = WSModule.sendWS('chat', payload);
+      if (sent) {
+        input.value = '';
+      }
+    });
   }
 
   // ---- Вставить сообщение ----
@@ -144,14 +172,20 @@ const ChatModule = (function () {
     const text = data.content || data.message || '';
     const isMine = GLOBAL.currentUser && [GLOBAL.currentUser.username, GLOBAL.currentUser.display_name].filter(Boolean).includes(author);
 
+    console.log('📨 Rendering message:', { author, avatar_url: data.avatar_url, isMine });
+
     const time = data.timestamp
       ? new Date(data.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+    const avatarContent = data.avatar_url 
+      ? `<img src="${data.avatar_url}" alt="" style="width: 100%; height: 100%; object-fit: cover;">` 
+      : escHtml((author || '?')[0].toUpperCase());
+
     const el = document.createElement('div');
     el.className = `chat-msg ${isMine ? 'chat-msg-mine' : ''}`;
     el.innerHTML = `
-      <div class="chat-avatar">${escHtml((author || '?')[0].toUpperCase())}</div>
+      <div class="chat-avatar">${avatarContent}</div>
       <div class="chat-bubble">
         <div class="chat-meta">
           <span class="chat-username">${escHtml(author)}</span>

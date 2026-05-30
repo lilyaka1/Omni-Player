@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch, clearToken, getToken } from '../utils/auth';
 import { showToast } from '../utils/toast';
 import { formatTime } from '../utils/format';
+import { SkeletonProfileCard, SkeletonCardGrid } from '../components/Skeleton';
 
 function getProfileTargetFromUrl() {
   try {
@@ -166,9 +167,12 @@ export default function ProfilePage() {
 
   if (loading) {
     return (
-      <div className="profile-page">
-        <div className="glass glass-primary profile-card" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 280 }}>
-          <div className="spinner" style={{ width: 32, height: 32, borderWidth: 3 }} />
+      <div className="page-section active">
+        <div className="profile-page">
+          <SkeletonProfileCard />
+          <div style={{ marginTop: '32px', width: '100%' }}>
+            <SkeletonCardGrid count={6} />
+          </div>
         </div>
       </div>
     );
@@ -190,9 +194,10 @@ export default function ProfilePage() {
   return (
     <>
       <div id="toast-container" />
-      <div className="profile-page" style={{ maxWidth: 960, margin: '0 auto', padding: 20 }}>
-        {/* ───── Шапка профиля ───── */}
-        <div className="glass glass-primary profile-card" style={{ position: 'relative' }}>
+      <div className="page-section active">
+        <div className="profile-page">
+          {/* ───── Шапка профиля ───── */}
+          <div className="glass glass-primary profile-card" style={{ position: 'relative' }}>
           <div className="profile-card-tools">
             <button className="btn btn-icon glass-tertiary" id="themeToggle" title="Переключить тему" style={{ width: 38, height: 38, fontSize: '0.9rem' }}>
               <i className="fa-solid fa-moon" id="themeIcon" />
@@ -338,6 +343,7 @@ export default function ProfilePage() {
           )}
         </div>
       </div>
+        </div>
 
       {/* ───── Edit profile modal ───── */}
       {editing && (

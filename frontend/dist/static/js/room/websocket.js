@@ -1,10 +1,9 @@
 /**
  * websocket.js — WebSocket соединение и диспетчер сообщений.
+ * MVP RADIO-MODE: никакого is_playing inference, hasIsPlaying, player.applyState
+ * с grace window. Только чистый current_track → play.
  *
  * Зависимости: globals.js (GLOBAL, showToast)
- *              player.js (PlayerModule) — опционально
- *              queue.js  (QueueModule)  — опционально
- *              chat.js   (ChatModule)   — опционально
  */
 
 const WSModule = (function () {
@@ -15,102 +14,96 @@ const WSModule = (function () {
   let _pendingMessages = [];
   let _lastMessageAt = 0;
   let _watchdogTimer = null;
-  let _stateSyncTimer = null;
-  let _stateSyncInFlight = false;
-  let _delayedTrackTimer = null;
-  let _delayedTrackSeq = 0;
-  let _trackMetaHoldUntil = 0;
+  const _staleTimeoutMs = 60000;
 
-  function getTrackMetaDelayMs() {
-    const v = Number((window.GLOBAL && GLOBAL.trackMetaDelayMs) || 4000);
-    if (!Number.isFinite(v)) return 4000;
-    return Math.max(0, v);
-  }
+  function syncRoomStreamFromPayload(payload) {
+    if (!payload) return;
 
-  function cancelDelayedTrackApply() {
-    _delayedTrackSeq += 1;
-    if (_delayedTrackTimer) {
-      clearTimeout(_delayedTrackTimer);
-      _delayedTrackTimer = null;
+    const trackId = Number(payload.track_id || (GLOBAL.currentTrack && GLOBAL.currentTrack.id) || 0);
+    const position = Number(payload.position);
+    if (!Number.isFinite(position) || position < 0) return;
+
+    const streamAudio = document.getElementById('streamAudio');
+    if (!streamAudio) {
+      window._pendingRoomStreamSeek = { trackId, position };
+      return;
     }
-  }
 
-  function flushPendingMessages() {
-    if (!GLOBAL.ws || GLOBAL.ws.readyState !== WebSocket.OPEN) return;
-    if (!_pendingMessages.length) return;
-    const batch = _pendingMessages;
-    _pendingMessages = [];
-    batch.forEach((payload) => {
+    if (trackId && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== trackId) {
+      return;
+    }
+
+    const applySeek = () => {
       try {
-        GLOBAL.ws.send(JSON.stringify(payload));
+        const duration = Number(streamAudio.duration);
+        let target = position;
+        if (Number.isFinite(duration) && duration > 0) {
+          target = Math.max(0, Math.min(position, Math.max(0, duration - 0.25)));
+        }
+        if (Math.abs((Number(streamAudio.currentTime) || 0) - target) > 0.35) {
+          streamAudio.currentTime = target;
+        }
+        GLOBAL.currentPosition = target;
       } catch {
-        _pendingMessages.push(payload);
+        window._pendingRoomStreamSeek = { trackId, position };
       }
-    });
+    };
+
+    if (streamAudio.readyState >= 1) {
+      applySeek();
+      return;
+    }
+
+    window._pendingRoomStreamSeek = { trackId, position };
+    if (streamAudio.__roomTrackSyncBound) return;
+
+    const flushPendingSeek = () => {
+      const pending = window._pendingRoomStreamSeek;
+      if (!pending) return;
+      if (pending.trackId && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== Number(pending.trackId)) return;
+      try {
+        const duration = Number(streamAudio.duration);
+        let target = Number(pending.position);
+        if (Number.isFinite(duration) && duration > 0) {
+          target = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
+        }
+        if (Math.abs((Number(streamAudio.currentTime) || 0) - target) > 0.35) {
+          streamAudio.currentTime = target;
+        }
+        GLOBAL.currentPosition = target;
+        window._pendingRoomStreamSeek = null;
+      } catch {
+        return;
+      }
+    };
+
+    streamAudio.addEventListener('loadedmetadata', flushPendingSeek);
+    streamAudio.addEventListener('canplay', flushPendingSeek);
+    streamAudio.__roomTrackSyncBound = true;
   }
 
-  function inferPlayingFromPayload(data, hasIsPlaying) {
-    if (hasIsPlaying) {
-      return !!(data.is_playing ?? data.playing);
-    }
-    const track = data.current_track || data.track || null;
-    const startedAt = Number(track && track.started_at);
-    if (track && Number.isFinite(startedAt) && startedAt > 0) {
-      return true;
-    }
-    return !!GLOBAL.isPlaying;
-  }
-
-  function resolveWsBase() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const host = location.hostname;
-    const port = String(location.port || '');
-    const isLocalHost = host === '127.0.0.1' || host === 'localhost';
-    const isViteDevPort = port === '5173' || port === '5174' || port === '5175';
-
-    // In local Vite dev, connect through proxy to backend WS.
-    if (isLocalHost && isViteDevPort) {
-      return `${proto}://${host}:5173`;
-    }
-    return `${proto}://${location.host}`;
-  }
-
-  // ---- Подключение ----
-
+  // ── connect ────────────────────────────────────────────────────────────────
   function connect() {
-    if (!GLOBAL.roomId) {
-      console.warn('[WS] roomId не задан');
-      return;
-    }
-
-    if (document.hidden || document.visibilityState !== 'visible') {
-      _isConnecting = false;
-      return;
-    }
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      _isConnecting = false;
-      return;
-    }
-    if (Date.now() < _wsCooldownUntil) {
-      _isConnecting = false;
-      return;
-    }
-
-    if (GLOBAL.ws && (GLOBAL.ws.readyState === WebSocket.OPEN || GLOBAL.ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
+    if (!GLOBAL.roomId) return;
+    if (document.hidden || document.visibilityState !== 'visible') { _isConnecting = false; return; }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) { _isConnecting = false; return; }
+    if (Date.now() < _wsCooldownUntil) { _isConnecting = false; return; }
+    if (GLOBAL.ws && (GLOBAL.ws.readyState === WebSocket.OPEN || GLOBAL.ws.readyState === WebSocket.CONNECTING)) return;
     if (_isConnecting) return;
     _isConnecting = true;
 
     bindLifecycleReconnect();
 
-    const base  = resolveWsBase();
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const host = location.hostname;
+    const port = String(location.port || '');
+    const isLocalHost = host === '127.0.0.1' || host === 'localhost';
+    const isViteDevPort = port === '5173' || port === '5174' || port === '5175';
+    const base = (isLocalHost && isViteDevPort) ? `${proto}://${host}:5173` : `${proto}://${location.host}`;
     const token = GLOBAL.token ? `?token=${encodeURIComponent(GLOBAL.token)}` : '';
-    const url   = `${base}/ws/rooms/${GLOBAL.roomId}${token}`;
+    const url = `${base}/ws/rooms/${GLOBAL.roomId}${token}`;
 
     console.log('[WS] Подключение к', url);
-    if (typeof roomTrace === 'function') roomTrace('ws.connect.start', { url });
-
     const ws = new WebSocket(url);
     GLOBAL.ws = ws;
 
@@ -118,16 +111,14 @@ const WSModule = (function () {
       _isConnecting = false;
       _lastMessageAt = Date.now();
       console.log('[WS] Соединение установлено');
-      if (typeof roomTrace === 'function') roomTrace('ws.open', { roomId: GLOBAL.roomId });
       GLOBAL._wsReconnectDelay = 2000;
       clearTimeout(GLOBAL._wsReconnectTimer);
       flushPendingMessages();
       startWatchdog();
-      startStateResync();
-      // Keep-alive ping каждые 25с
       ws._pingInterval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'ping' }));
+          _lastMessageAt = Date.now();
         }
       }, 25000);
     };
@@ -136,23 +127,12 @@ const WSModule = (function () {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
       _lastMessageAt = Date.now();
-      if (typeof roomTrace === 'function') {
-        roomTrace('ws.message.in', {
-          type: msg.type,
-          hasData: Boolean(msg.data),
-          isPlaying: msg?.data?.is_playing ?? msg?.is_playing,
-          trackId: (msg?.data?.current_track || msg?.data?.track || msg?.track || {}).id || null,
-        });
-      }
       dispatch(msg);
     };
 
-    ws.onerror = (err) => {
+    ws.onerror = () => {
       _isConnecting = false;
-      if (document.hidden || ws.__intentionalClose) {
-        return;
-      }
-      if (typeof roomTrace === 'function') roomTrace('ws.error', { roomId: GLOBAL.roomId });
+      if (document.hidden || ws.__intentionalClose) return;
       console.warn('[WS] Ошибка соединения, будет переподключение');
     };
 
@@ -161,28 +141,21 @@ const WSModule = (function () {
       const intentionalClose = Boolean(ws.__intentionalClose);
       if (intentionalClose) {
         clearInterval(ws._pingInterval);
-        if (typeof roomTrace === 'function') roomTrace('ws.close.intentional', { reason: ev.reason || '' });
         GLOBAL.ws = null;
         return;
       }
-      if (String(ev.reason || '').toLowerCase().includes('suspension')) {
-        console.log('[WS] Закрыто из-за suspension, восстановим при возврате во вкладку');
-      } else {
-        console.warn('[WS] Соединение закрыто, код:', ev.code);
-      }
       clearInterval(ws._pingInterval);
-      if (typeof roomTrace === 'function') roomTrace('ws.close', { code: ev.code, reason: ev.reason || '' });
       GLOBAL.ws = null;
       scheduleReconnect();
     };
   }
 
+  // ── Watchdog ────────────────────────────────────────────────────────────
   function startWatchdog() {
     if (_watchdogTimer) return;
     _watchdogTimer = setInterval(() => {
       if (document.hidden || document.visibilityState !== 'visible') return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-
       const ws = GLOBAL.ws;
       if (!ws || ws.readyState === WebSocket.CLOSED) {
         clearTimeout(GLOBAL._wsReconnectTimer);
@@ -190,11 +163,9 @@ const WSModule = (function () {
         connect();
         return;
       }
-
       if (ws.readyState !== WebSocket.OPEN) return;
-
       const silentForMs = Date.now() - (_lastMessageAt || 0);
-      if (silentForMs > 20000) {
+      if (silentForMs > _staleTimeoutMs) {
         console.warn('[WS] Watchdog: socket stale, reconnecting...');
         ws.__intentionalClose = true;
         try { ws.close(1000, 'watchdog-stale'); } catch {}
@@ -206,60 +177,13 @@ const WSModule = (function () {
     }, 5000);
   }
 
-  function startStateResync() {
-    if (_stateSyncTimer) return;
-    _stateSyncTimer = setInterval(async () => {
-      if (!GLOBAL.roomId) return;
-      if (document.hidden || document.visibilityState !== 'visible') return;
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-      if (_stateSyncInFlight) return;
-
-      _stateSyncInFlight = true;
-      try {
-        const res = await fetch(`/rooms/${GLOBAL.roomId}/playback-state`, { cache: 'no-store' });
-        if (!res.ok) return;
-        const state = await res.json();
-        if (!state || typeof state !== 'object') return;
-
-        const normalized = {
-          current_track: state.current_track || null,
-          is_playing: Boolean(state.is_playing),
-          position: Number(state.position || 0),
-          current_time: Number(state.position || 0),
-        };
-
-        const incomingId = normalized.current_track && Number(normalized.current_track.id);
-        const currentId = GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id);
-        if (
-          Number.isFinite(incomingId) && Number.isFinite(currentId)
-          && incomingId !== currentId
-          && Date.now() < _trackMetaHoldUntil
-        ) {
-          return;
-        }
-
-        if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
-          PlayerModule.applyState(normalized);
-        }
-      } catch {
-        // noop
-      } finally {
-        _stateSyncInFlight = false;
-      }
-    }, 2500);
-  }
-
+  // ── Reconnect ───────────────────────────────────────────────────────────
   function scheduleReconnect() {
-    if (document.hidden || document.visibilityState !== 'visible') {
-      return;
-    }
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-      return;
-    }
+    if (document.hidden || document.visibilityState !== 'visible') return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     const delay = GLOBAL._wsReconnectDelay;
     console.log(`[WS] Переподключение через ${delay}мс...`);
     GLOBAL._wsReconnectTimer = setTimeout(() => {
-      // Экспоненциальный backoff, не больше 30с
       GLOBAL._wsReconnectDelay = Math.min(GLOBAL._wsReconnectDelay * 1.5, 30000);
       connect();
     }, delay);
@@ -277,13 +201,8 @@ const WSModule = (function () {
     };
 
     const reconnectNow = () => {
-      if (document.hidden || document.visibilityState !== 'visible') {
-        return;
-      }
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        closeIfOpen('offline');
-        return;
-      }
+      if (document.hidden || document.visibilityState !== 'visible') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) { closeIfOpen('offline'); return; }
       if (!GLOBAL.ws || GLOBAL.ws.readyState === WebSocket.CLOSED) {
         clearTimeout(GLOBAL._wsReconnectTimer);
         GLOBAL._wsReconnectDelay = 2000;
@@ -296,52 +215,42 @@ const WSModule = (function () {
     window.addEventListener('focus', reconnectNow);
     window.addEventListener('pageshow', reconnectNow);
     window.addEventListener('online', reconnectNow);
-    window.addEventListener('offline', () => {
-      closeIfOpen('offline');
-    });
+    window.addEventListener('offline', () => { closeIfOpen('offline'); });
+    window.addEventListener('pagehide', () => { closeIfOpen('page-hide'); });
+  }
 
-    window.addEventListener('pagehide', () => {
-      closeIfOpen('page-hide');
+  // ── Send ─────────────────────────────────────────────────────────────────
+  function flushPendingMessages() {
+    if (!GLOBAL.ws || GLOBAL.ws.readyState !== WebSocket.OPEN) return;
+    if (!_pendingMessages.length) return;
+    const batch = _pendingMessages;
+    _pendingMessages = [];
+    batch.forEach(payload => {
+      try { GLOBAL.ws.send(JSON.stringify(payload)); }
+      catch { _pendingMessages.push(payload); }
     });
   }
 
-  // ---- Отправка ----
-
-  /**
-   * Отправить сообщение на сервер.
-   * @param {string} type
-   * @param {object} data — дополнительные поля
-   */
   function sendWS(type, data) {
     const payload = { type, ...data };
 
     if (!GLOBAL.ws || GLOBAL.ws.readyState !== WebSocket.OPEN) {
       if (_pendingMessages.length > 20) _pendingMessages.shift();
       _pendingMessages.push(payload);
-
       if (!GLOBAL.ws || GLOBAL.ws.readyState === WebSocket.CLOSED) {
         clearTimeout(GLOBAL._wsReconnectTimer);
         GLOBAL._wsReconnectDelay = 800;
         connect();
       }
-
       console.warn('[WS] Не подключён, сообщение поставлено в очередь:', type);
       return false;
     }
 
     GLOBAL.ws.send(JSON.stringify(payload));
-    if (typeof roomTrace === 'function') {
-      roomTrace('ws.message.out', {
-        type,
-        action: data && data.action,
-        track_id: data && data.track_id,
-      });
-    }
     return true;
   }
 
-  // ---- Диспетчер входящих сообщений ----
-
+  // ── Dispatch ───────────────────────────────────────────────────────────
   function dispatch(msg) {
     switch (msg.type) {
 
@@ -354,7 +263,11 @@ const WSModule = (function () {
         break;
 
       case 'track_changed':
-        handleTrackChangedLegacy(msg);
+        handleTrackChanged(msg);
+        break;
+
+      case 'track_sync':
+        handleTrackSync(msg);
         break;
 
       case 'queue_updated':
@@ -362,17 +275,13 @@ const WSModule = (function () {
           if (Array.isArray(msg.data)) {
             QueueModule.setQueue(msg.data);
           } else {
-            // Backend often sends incremental payload {track_added, queue_position}.
-            // Reload full queue instead of wiping it with a non-array payload.
             QueueModule.loadQueue();
           }
         }
         break;
 
       case 'chat':
-        if (typeof ChatModule !== 'undefined') {
-          ChatModule.appendMessage(msg);
-        }
+        if (typeof ChatModule !== 'undefined') ChatModule.appendMessage(msg);
         break;
 
       case 'chat_history':
@@ -390,11 +299,14 @@ const WSModule = (function () {
         break;
 
       case 'pong':
-        // keep-alive ответ, игнорируем
         break;
 
       case 'playback_started':
-        handlePlaybackStarted(msg.data || msg);
+        GLOBAL.isPlaying = true;
+        // Обновляем UI если есть PlayerModule
+        if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
+          PlayerModule.applyState({ is_playing: true, current_track: GLOBAL.currentTrack });
+        }
         break;
 
       case 'thumbnail_updated':
@@ -402,155 +314,89 @@ const WSModule = (function () {
         break;
 
       default:
-        console.log('[WS] Неизвестный тип:', msg.type, msg);
+        console.log('[WS] Неизвестный тип:', msg.type);
     }
   }
 
-  // ---- Обработчики событий ----
-
+  // ── Handlers (Radio Mode) ─────────────────────────────────────────────────
   function handleRoomState(data) {
     if (!data) return;
-    cancelDelayedTrackApply();
-
-    const hasIsPlaying = Object.prototype.hasOwnProperty.call(data, 'is_playing')
-      || Object.prototype.hasOwnProperty.call(data, 'playing');
-    const hasPosition = Object.prototype.hasOwnProperty.call(data, 'position')
-      || Object.prototype.hasOwnProperty.call(data, 'current_time');
-
-    const incomingTrack = data.current_track || data.track || null;
-    const incomingPlaying = inferPlayingFromPayload(data, hasIsPlaying);
-    if (hasPosition) {
-      const pos = Number(data.position ?? data.current_time);
-      GLOBAL.currentPosition = Number.isFinite(pos) ? pos : (GLOBAL.currentPosition || 0);
-    } else {
-      // Fallback for "radio mode": backend may send track.started_at without position.
-      const startedAt = Number((data.current_track || data.track || {}).started_at);
-      if (Number.isFinite(startedAt) && startedAt > 0) {
-        const nowSec = Date.now() / 1000;
-        GLOBAL.currentPosition = Math.max(0, nowSec - startedAt);
-      }
+    const track = data.current_track || data.track || null;
+    const isPlaying = data.is_playing;
+    setGlobalFromTrack(track, isPlaying);
+    if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
+      PlayerModule.applyState(data);
     }
-
-    // Backend may send user role as role/user_role, and values differ by enum.
+    // User role
     const incomingRole = String(data.user_role || data.role || '').toLowerCase();
     if (incomingRole.includes('admin') || incomingRole.includes('owner')) {
       GLOBAL.userRole = 'owner';
     } else if (incomingRole.includes('user') || incomingRole.includes('listener')) {
       GLOBAL.userRole = 'listener';
     }
-
-    if (typeof PlayerModule !== 'undefined') {
-      PlayerModule.applyState(data);
-    }
-
-    GLOBAL.currentTrack = incomingTrack;
-    GLOBAL.isPlaying = incomingPlaying;
-
-    // Do not clobber queue if room_state does not carry full queue payload.
-    if (typeof QueueModule !== 'undefined' && Array.isArray(data.queue)) {
-      QueueModule.setQueue(data.queue || []);
-    } else if (typeof QueueModule !== 'undefined' && (!GLOBAL.queue || !GLOBAL.queue.length)) {
-      QueueModule.loadQueue();
-    }
-
+    // Online count
     updateOnlineCount(data.users || 0);
   }
 
   function handleTrackChange(data) {
     if (!data) return;
-    cancelDelayedTrackApply();
-    _trackMetaHoldUntil = 0;
-    const hasIsPlaying = Object.prototype.hasOwnProperty.call(data, 'is_playing')
-      || Object.prototype.hasOwnProperty.call(data, 'playing');
-    const hasPosition = Object.prototype.hasOwnProperty.call(data, 'position')
-      || Object.prototype.hasOwnProperty.call(data, 'current_time');
-
-    const incomingTrack = data.current_track || data.track || null;
-    const incomingPlaying = inferPlayingFromPayload(data, hasIsPlaying);
-    if (hasPosition) {
-      const pos = Number(data.position ?? data.current_time);
-      GLOBAL.currentPosition = Number.isFinite(pos) ? pos : (GLOBAL.currentPosition || 0);
-    } else {
-      const startedAt = Number((data.current_track || data.track || {}).started_at);
-      if (Number.isFinite(startedAt) && startedAt > 0) {
-        const nowSec = Date.now() / 1000;
-        GLOBAL.currentPosition = Math.max(0, nowSec - startedAt);
-      }
-    }
-
-    if (typeof PlayerModule !== 'undefined') {
+    const track = data.current_track || data.track || null;
+    const isPlaying = data.is_playing;
+    setGlobalFromTrack(track, isPlaying);
+    if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
       PlayerModule.applyState(data);
     }
-
-    GLOBAL.currentTrack = incomingTrack;
-    GLOBAL.isPlaying = incomingPlaying;
   }
 
-  function handleTrackChangedLegacy(msg) {
+  function handleTrackChanged(msg) {
     const track = msg.track || (msg.data && (msg.data.current_track || msg.data.track)) || null;
     const base = msg.data || {};
     const normalized = {
       ...base,
       current_track: track,
-      track,
-      is_playing: true,
-      current_time: typeof base.current_time !== 'undefined' ? base.current_time : 0,
+      track: track,
     };
+    // Для track_changed события, если трек есть - значит он играет
+    const isPlaying = Boolean(track);
+    setGlobalFromTrack(track, isPlaying);
+    if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
+      PlayerModule.applyState(normalized);
+    }
+  }
 
-    const delayMs = getTrackMetaDelayMs();
-    if (delayMs <= 0) {
-      handleTrackChange(normalized);
+  function handleTrackSync(msg) {
+    const payload = msg.payload || msg.data || msg || {};
+    if (!payload) return;
+    syncRoomStreamFromPayload(payload);
+
+    const streamAudio = document.getElementById('streamAudio');
+    if (!streamAudio) return;
+
+    if (payload.is_playing === false) {
+      streamAudio.pause();
+      GLOBAL.isPlaying = false;
       return;
     }
 
-    cancelDelayedTrackApply();
-    _trackMetaHoldUntil = Date.now() + delayMs;
-    const seq = _delayedTrackSeq;
-    if (typeof roomTrace === 'function') {
-      roomTrace('ws.track_changed.delayed', {
-        delayMs,
-        trackId: track && track.id ? track.id : null,
+    if (payload.is_playing === true && streamAudio.src && streamAudio.paused) {
+      streamAudio.play().catch(function (err) {
+        if (err && err.name === 'NotAllowedError') {
+          window._pendingStreamUrl = streamAudio.src;
+          if (typeof window.showPlayPrompt === 'function') window.showPlayPrompt();
+        }
       });
-    }
-
-    _delayedTrackTimer = setTimeout(() => {
-      if (seq !== _delayedTrackSeq) return;
-      _delayedTrackTimer = null;
-      handleTrackChange(normalized);
-    }, delayMs);
-  }
-
-  function handlePlaybackStarted(data) {
-    GLOBAL.isPlaying = true;
-    if (typeof PlayerModule !== 'undefined' && GLOBAL.currentTrack) {
-      PlayerModule.applyState({
-        current_track: GLOBAL.currentTrack,
-        is_playing: true,
-        current_time: GLOBAL.currentPosition || 0,
-        ...(data || {}),
-      });
+      GLOBAL.isPlaying = true;
     }
   }
 
-  function handleThumbnailUpdated(msg) {
-    if (!msg) return;
-    const trackId = Number(msg.track_id);
-    const thumbnail = msg.thumbnail || '';
-    if (!trackId || !thumbnail) return;
-
-    if (GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) === trackId) {
-      GLOBAL.currentTrack = { ...GLOBAL.currentTrack, thumbnail };
-      if (typeof PlayerModule !== 'undefined') {
-        PlayerModule.applyState({
-          current_track: GLOBAL.currentTrack,
-          is_playing: GLOBAL.isPlaying,
-          current_time: GLOBAL.currentPosition || 0,
-        });
-      }
-    }
-
-    if (typeof QueueModule !== 'undefined' && typeof QueueModule.loadQueue === 'function') {
-      QueueModule.loadQueue();
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  function setGlobalFromTrack(track, isPlaying = null) {
+    GLOBAL.currentTrack = track;
+    // Используем явно переданное состояние, если есть, иначе определяем по наличию трека
+    if (isPlaying !== null) {
+      GLOBAL.isPlaying = Boolean(isPlaying);
+    } else {
+      GLOBAL.isPlaying = Boolean(track);
     }
   }
 
@@ -562,13 +408,28 @@ const WSModule = (function () {
     const info = document.getElementById('infoListeners');
     if (info) info.textContent = count;
     GLOBAL.listenerCount = count;
-
     if (window.RoomAuthUI && typeof window.RoomAuthUI.refreshListeners === 'function') {
       window.RoomAuthUI.refreshListeners();
     }
   }
 
-  // ---- Public API ----
+  function handleThumbnailUpdated(msg) {
+    if (!msg) return;
+    const trackId = Number(msg.track_id);
+    const thumb = msg.thumbnail || '';
+    if (!trackId || !thumb) return;
+    if (GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) === trackId) {
+      GLOBAL.currentTrack = { ...GLOBAL.currentTrack, thumbnail: thumb };
+      if (typeof PlayerModule !== 'undefined') {
+        PlayerModule.applyState({ current_track: GLOBAL.currentTrack });
+      }
+    }
+    if (typeof QueueModule !== 'undefined' && typeof QueueModule.loadQueue === 'function') {
+      QueueModule.loadQueue();
+    }
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────────
   return { connect, sendWS };
 
 })();

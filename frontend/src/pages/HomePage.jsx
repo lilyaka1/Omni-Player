@@ -2,23 +2,27 @@ import { useEffect, useMemo, useState } from 'react';
 import { getToken, clearToken } from '../utils/auth';
 import { showToast } from '../utils/toast';
 import { escHtml, formatTime } from '../utils/format';
+import ProfilePage from './ProfilePage';
+import { SkeletonRoomGrid } from '../components/Skeleton';
+import { useSwipe } from '../hooks/useSwipe';
 
 const GENRES = [
-  { name: 'Lofi', color: '#6c63ff,#a855f7', icon: '🎵' },
-  { name: 'Hip-Hop', color: '#f59e0b,#ef4444', icon: '🎤' },
-  { name: 'Electronic', color: '#3b82f6,#8b5cf6', icon: '🎛' },
-  { name: 'Indie', color: '#10b981,#059669', icon: '🎸' },
-  { name: 'Jazz', color: '#f97316,#eab308', icon: '🎺' },
-  { name: 'Pop', color: '#ec4899,#f43f5e', icon: '⭐' },
-  { name: 'Metal', color: '#6b7280,#374151', icon: '🤘' },
-  { name: 'Acoustic', color: '#84cc16,#16a34a', icon: '🪕' },
-  { name: 'R&B', color: '#0ea5e9,#6c63ff', icon: '🎙' },
-  { name: 'Classical', color: '#d97706,#92400e', icon: '🎻' },
+  { name: 'Lofi', color: '#6c63ff,#a855f7' },
+  { name: 'Hip-Hop', color: '#f59e0b,#ef4444' },
+  { name: 'Electronic', color: '#3b82f6,#8b5cf6' },
+  { name: 'Indie', color: '#10b981,#059669' },
+  { name: 'Jazz', color: '#f97316,#eab308' },
+  { name: 'Pop', color: '#ec4899,#f43f5e' },
+  { name: 'Metal', color: '#6b7280,#374151' },
+  { name: 'Acoustic', color: '#84cc16,#16a34a' },
+  { name: 'R&B', color: '#0ea5e9,#6c63ff' },
+  { name: 'Classical', color: '#d97706,#92400e' },
 ];
 
 export default function HomePage() {
   const token = getToken();
   const [page, setPage] = useState('home');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [rooms, setRooms] = useState([]);
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
@@ -53,6 +57,34 @@ export default function HomePage() {
     loadCurrentUser();
     loadRooms();
   }, []);
+
+  // Reload user when returning to home or after profile edit
+  useEffect(() => {
+    if (page === 'home') {
+      loadCurrentUser();
+    }
+    // Close sidebar on mobile when page changes
+    setSidebarOpen(false);
+  }, [page]);
+
+  // Swipe navigation (left = next page, right = previous page)
+  const pages = ['home', 'rooms', 'genres', 'profile'];
+  const currentPageIndex = pages.indexOf(page);
+
+  useSwipe(
+    () => {
+      // Swipe left -> next page
+      if (currentPageIndex < pages.length - 1) {
+        setPage(pages[currentPageIndex + 1]);
+      }
+    },
+    () => {
+      // Swipe right -> previous page
+      if (currentPageIndex > 0) {
+        setPage(pages[currentPageIndex - 1]);
+      }
+    }
+  );
 
   async function loadCurrentUser() {
     if (!token) return;
@@ -240,7 +272,10 @@ export default function HomePage() {
     <>
       <div id="toast-container" />
       <div className="app-shell">
-        <aside className="sidebar glass glass-primary">
+        <button className="hamburger-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
+          <i className={`fa-solid ${sidebarOpen ? 'fa-times' : 'fa-bars'}`} />
+        </button>
+        <aside className={`sidebar glass glass-primary ${sidebarOpen ? 'open' : ''}`}>
           <div className="sidebar-logo">
             <div className="logo-icon"><i className="fa-solid fa-circle-play" /></div>
             <span>Omniplayer</span>
@@ -302,13 +337,19 @@ export default function HomePage() {
 
           <div className="sidebar-footer">
             {currentUser ? (
-              <div className="user-card">
-                <div className="user-avatar">{currentUser.username?.[0]?.toUpperCase() || '?'}</div>
+              <div className="user-card" onClick={() => setPage('profile')} style={{ cursor: 'pointer' }}>
+                <div className="user-avatar">
+                  {currentUser.avatar_url ? (
+                    <img src={currentUser.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  ) : (
+                    currentUser.username?.[0]?.toUpperCase() || '?'
+                  )}
+                </div>
                 <div className="user-info">
                   <div className="name">{currentUser.username}</div>
                   <div className="role">{currentUser.is_admin ? 'Администратор' : 'Пользователь'}</div>
                 </div>
-                <button className="logout-btn" title="Выйти" onClick={() => { clearToken(); window.location.href = '/login'; }}>
+                <button className="logout-btn" title="Выйти" onClick={(e) => { e.stopPropagation(); clearToken(); window.location.href = '/login'; }}>
                   <i className="fa-solid fa-right-from-bracket" />
                 </button>
               </div>
@@ -322,7 +363,7 @@ export default function HomePage() {
 
         <main className="main-content">
           {page === 'home' && (
-            <div className="page-section active">
+            <div className="page-section active" key="home">
               <div className="page-header">
                 <div>
                   <h2>{greetingText}</h2>
@@ -338,7 +379,7 @@ export default function HomePage() {
               </div>
 
               <div className="featured-banner" onClick={() => setPage('rooms')}>
-                <div className="fb-bg" style={{ background: 'linear-gradient(135deg,#6c63ff 0%,#a855f7 55%,#ec4899 100%)' }} />
+                <div className="fb-bg" />
                 <div className="fb-overlay" />
                 <div className="fb-content">
                   <div className="fb-tag">Популярное сейчас</div>
@@ -356,7 +397,7 @@ export default function HomePage() {
                   <button className="sec-link" onClick={() => setPage('rooms')}>Смотреть все →</button>
                 </div>
                 <div className="h-strip">
-                  {roomsLoading && <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '20px 0' }}>Загрузка...</div>}
+                  {roomsLoading && <SkeletonRoomGrid count={4} style={{ gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }} />}
                   {!roomsLoading && !rooms.length && <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '20px 0' }}>Комнат пока нет</div>}
                   {!roomsLoading && rooms.slice(0, 8).map((room) => (
                     <div className="room-card room-sm glass glass-secondary" key={room.id} onClick={() => (window.location.href = `/user?room_id=${room.id}`)} style={{ width: 160 }}>
@@ -384,7 +425,7 @@ export default function HomePage() {
           )}
 
           {page === 'rooms' && (
-            <div className="page-section active">
+            <div className="page-section active" key="rooms">
               <div className="page-header">
                 <div>
                   <h2>Комнаты</h2>
@@ -400,11 +441,7 @@ export default function HomePage() {
               </div>
 
               <div className="rooms-grid">
-                {roomsLoading && (
-                  <div style={{ gridColumn: '1/-1', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 60 }}>
-                    <div className="spinner" style={{ width: 32, height: 32, borderWidth: 3 }} />
-                  </div>
-                )}
+                {roomsLoading && <SkeletonRoomGrid count={12} />}
                 {!roomsLoading && !filteredRooms.length && (
                   <div className="empty-state" style={{ gridColumn: '1/-1' }}>
                     <i className="fa-solid fa-door-closed" />
@@ -470,14 +507,14 @@ export default function HomePage() {
           )}
 
           {page === 'genres' && (
-            <div className="page-section active">
+            <div className="page-section active" key="genres">
               <div className="page-header"><div><h2>Жанры</h2><p className="sub">Выбери своё настроение</p></div></div>
               <div className="genres-grid">
                 {GENRES.map((g) => {
                   const [c1, c2] = g.color.split(',');
                   return (
                     <button key={g.name} className="genre-chip" style={{ background: `linear-gradient(135deg, ${c1}, ${c2})` }} onClick={() => setSelectedGenre(g)}>
-                      <span>{g.icon} {g.name}</span>
+                      <span>{g.name}</span>
                     </button>
                   );
                 })}
@@ -515,6 +552,8 @@ export default function HomePage() {
               )}
             </div>
           )}
+
+          {page === 'profile' && <div key="profile" className="page-section active"><ProfilePage /></div>}
         </main>
       </div>
 

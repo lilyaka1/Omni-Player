@@ -228,16 +228,27 @@ async def handle_chat(room_id: int, user, data: dict) -> None:
             _db.add(msg)
             _db.commit()
             _db.refresh(msg)
-            return {"id": msg.id, "timestamp": msg.created_at.isoformat()}
+            
+            # Fetch user data including avatar_url
+            db_user = _db.query(User).filter(User.id == user.id).first()
+            avatar_url = db_user.avatar_url if db_user else None
+            
+            return {
+                "id": msg.id, 
+                "timestamp": msg.created_at.isoformat(),
+                "avatar_url": avatar_url
+            }
         finally:
             _db.close()
 
     result = await asyncio.to_thread(_save)
+    
     await manager.broadcast_event(room_id, 'chat', {
         "id": result["id"],
         "user": user.username or user.email,
         "content": data.get("content", ""),
         "timestamp": result["timestamp"],
+        "avatar_url": result.get("avatar_url"),
     })
 
 

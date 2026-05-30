@@ -671,3 +671,333 @@
 .live-admin-tts-item.status-timeout { border-color: #d36; }
 .live-admin-tts-item.status-cancelled,
 .live-admin-tts-item.status-played { opacity: .55; }
+
+/* ===== PAGE TRANSITIONS ===== */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeOut {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+.page-section {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+.page-section.exit {
+  animation: fadeOut 0.2s ease-in-out forwards;
+}
+
+/* ===== SKELETON LOADERS ===== */
+@keyframes skeleton-loading {
+  0% { background-position: -1000px 0; }
+  100% { background-position: 1000px 0; }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--btn-bg) 25%,
+    var(--glass-hover-bg) 50%,
+    var(--btn-bg) 75%
+  );
+  background-size: 1000px 100%;
+  animation: skeleton-loading 2s infinite;
+  border-radius: var(--radius-md);
+}
+
+.skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--glass-border);
+  background: var(--btn-bg);
+}
+
+.skeleton-img {
+  width: 100%;
+  height: 200px;
+  border-radius: var(--radius-md);
+}
+
+.skeleton-text {
+  height: 16px;
+  width: 100%;
+  border-radius: 4px;
+}
+
+.skeleton-text.short {
+  width: 70%;
+}
+
+.skeleton-text.title {
+  height: 24px;
+  width: 90%;
+  margin-bottom: 8px;
+}
+
+.skeleton-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+/* ===== MOBILE RESPONSIVE ===== */
+@media (max-width: 1024px) {
+  .library-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    height: 100vh;
+    width: 220px;
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+    z-index: 1000;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .library-main {
+    padding: 24px 16px;
+  }
+}
+
+@media (max-width: 768px) {
+  .library-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .library-main {
+    padding: 16px 12px;
+  }
+
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .page-header-wrap {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .header-actions {
+    width: 100%;
+    gap: 8px;
+  }
+
+  .search-bar {
+    flex: 1;
+  }
+
+  /* Touch-friendly buttons */
+  .btn {
+    padding: 12px 16px;
+    min-height: 44px;
+    min-width: 44px;
+    font-size: 0.9rem;
+  }
+
+  .btn-accent,
+  .btn-ghost {
+    padding: 12px 16px;
+    min-height: 44px;
+  }
+
+  /* Room cards on mobile */
+  .rooms-grid {
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  }
+
+  /* Profile page mobile */
+  .profile-page {
+    margin-left: 0 !important;
+    margin-top: 16px;
+  }
+
+  .profile-card {
+    padding: 20px 16px;
+  }
+
+  /* Featured banner mobile */
+  .featured-banner {
+    padding: 20px 16px;
+    min-height: 140px;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .fb-play {
+    width: 44px;
+    height: 44px;
+    font-size: 1rem;
+  }
+
+  .fb-content h2 {
+    font-size: 1.3rem;
+  }
+
+  /* Sidebar navigation */
+  .navbar-section {
+    padding: 12px 8px;
+  }
+
+  .nav-link {
+    padding: 10px 12px;
+    font-size: 0.85rem;
+  }
+
+  /* Input and search mobile */
+  .search-bar-row input {
+    font-size: 16px;
+    padding: 10px;
+  }
+
+  input.input,
+  select {
+    font-size: 16px;
+    padding: 12px;
+    min-height: 44px;
+  }
+
+  /* Genre chips */
+  .genre-chip {
+    padding: 8px 12px;
+    font-size: 0.75rem;
+    min-height: 36px;
+  }
+
+  /* Modal */
+  .modal {
+    max-width: 90vw;
+    max-height: 90vh;
+  }
+
+  .modal-content {
+    padding: 20px 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .library-main {
+    padding: 12px 8px;
+  }
+
+  .page-header {
+    margin-bottom: 16px;
+  }
+
+  .page-header h2 {
+    font-size: 1.5rem;
+  }
+
+  .rooms-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+
+  .room-card {
+    padding: 10px;
+  }
+
+  .featured-banner {
+    padding: 16px 12px;
+    min-height: 120px;
+  }
+
+  .fb-content h2 {
+    font-size: 1.1rem;
+  }
+
+  .btn {
+    padding: 10px 14px;
+    font-size: 0.85rem;
+  }
+
+  /* Skeleton on mobile */
+  .skeleton-list {
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 12px;
+  }
+
+  .h-strip {
+    scroll-behavior: smooth;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .h-strip::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .h-strip::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb);
+    border-radius: 2px;
+  }
+}
+
+/* ===== HAMBURGER MENU (MOBILE) ===== */
+.hamburger-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 1024px) {
+  .hamburger-btn {
+    display: flex;
+  }
+
+  .sidebar {
+    box-shadow: -2px 0 8px rgba(0, 0, 0, 0.2);
+  }
+
+  .sidebar.open::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: -1;
+  }
+}
+
+@media (max-width: 768px) {
+  .hamburger-btn {
+    margin-right: 8px;
+  }
+
+  .library-layout {
+    display: flex;
+    flex-direction: column;
+  }
+}
