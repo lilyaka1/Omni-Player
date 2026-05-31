@@ -127,3 +127,22 @@ coverage/
 # Ignore local IDE/session/state files
 .session
 
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Mac
+.DS_Store
+
+# Database
+*.db
+
+# IDE
+.vscode/
+.idea/
+
+# Frontend dist
+frontend/dist/
+
