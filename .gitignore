@@ -64,85 +64,56 @@ pnpm-debug.log*
 *.sqlite3
 *.db
 *.sqlite
+*.sqlite3
+postgres_data/
+*.dump
+*.sql.gz
 
-# Jupyter
-.ipynb_checkpoints
-
-# System files
-Thumbs.db
-ehthumbs.db
-
-# Node / frontend
-node_modules/
-.pnp/
-.pnp.js
-dist/
-build/
-.vite/
-.turbo/
-/.cache
-
-# Vite / npm
-/.vite
-npm-debug.log*
-yarn.lock
-package-lock.json
-
-# Docker
-*.env
-.env.*
-docker-compose.override.yml.local
-
-# Secrets / keys
-*.pem
-*.key
-secrets.yml
-secrets.json
-
-# Uploaded/media and runtime outputs
-static/uploads/
-output/
-downloads/
-tts_audio/
-tts_models/
-wheels/
-
-# Binary / compiled
-*.so
-*.dylib
-*.dll
-
-# Temp
-tmp/
-temp/
+# Логи
+*.log
+logs/
 *.pid
 
-# Coverage reports
-coverage/
-
-# Misc
-*.swp
-*.swo
-
-# Ignore local IDE/session/state files
-.session
-
-
-# Python
+# Кэш
+.cache/
+*.cache
 __pycache__/
-*.py[cod]
-*.pyc
+.hypothesis/
+.benchmarks/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
 
-# Mac
-.DS_Store
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
 
-# Database
-*.db
+# Profiling
+*.prof
+*.lprof
 
-# IDE
-.vscode/
-.idea/
+# Скачанные медиафайлы (кэш yt-dlp)
+downloads/
+*.part
+*.ytdl
 
-# Frontend dist
-frontend/dist/
+# Медиафайлы
+*.mp3
+*.m4a
+*.webm
+*.opus
+*.ogg
+*.mp4
+*.flac
+*.wav
+*.aac
 
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Временные файлы
+*.tmp
+*.temp
+*.bak
+*.orig

@@ -7,7 +7,10 @@ var _currentRoomId = null;
 var _streamAudio = null;
 var _streamConnectInFlight = false;
 var _streamConnectUrl = '';
+<<<<<<< HEAD
 var _streamEndAdvanceRequestedAt = 0;
+=======
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
 
 // ── Audio элемент ─────────────────────────────────────────────────────────────
 function _getOrCreateStreamAudio() {
@@ -25,6 +28,7 @@ function _getOrCreateStreamAudio() {
   });
   _streamAudio.addEventListener('ended', function () {
     console.log('ℹ️ streamAudio ended');
+<<<<<<< HEAD
     if (!GLOBAL || !GLOBAL.roomId || !GLOBAL.currentTrack) return;
     var now = Date.now();
     if (now - _streamEndAdvanceRequestedAt < 4000) return;
@@ -65,6 +69,10 @@ function _getOrCreateStreamAudio() {
     });
   }
   
+=======
+  });
+  console.log('✅ streamAudio element created');
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
   return _streamAudio;
 }
 

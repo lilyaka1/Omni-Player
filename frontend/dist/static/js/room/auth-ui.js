@@ -117,6 +117,7 @@
         GLOBAL.currentUser.is_admin
       )) {
         GLOBAL.userRole = 'owner';
+<<<<<<< HEAD
         const adminBtn = document.getElementById('roomAdminBtn');
         if (adminBtn) adminBtn.style.display = 'inline-flex';
       }
@@ -124,6 +125,8 @@
       if (GLOBAL.currentUser && GLOBAL.currentUser.role === 'admin') {
         const adminBtn = document.getElementById('roomAdminBtn');
         if (adminBtn) adminBtn.style.display = 'inline-flex';
+=======
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
       }
 
       // Загрузить список слушателей

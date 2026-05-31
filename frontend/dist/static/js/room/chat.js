@@ -20,6 +20,7 @@ const ChatModule = (function () {
     } catch {}
   }
 
+<<<<<<< HEAD
   function normalizeMessagePayload(raw) {
     if (!raw || typeof raw !== 'object') return raw;
     if (raw.data && typeof raw.data === 'object') {
@@ -28,6 +29,8 @@ const ChatModule = (function () {
     return raw;
   }
 
+=======
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
   function restoreMessages() {
     try {
       const raw = localStorage.getItem(storageKey());
@@ -54,7 +57,11 @@ const ChatModule = (function () {
 
   function setHistory(list) {
     if (!Array.isArray(list)) return;
+<<<<<<< HEAD
     const normalized = list.slice(-MAX_MESSAGES).map(normalizeMessagePayload);
+=======
+    const normalized = list.slice(-MAX_MESSAGES);
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
     _messages = normalized;
 
     _seenMessageIds.clear();
@@ -118,7 +125,10 @@ const ChatModule = (function () {
   // ---- Вставить сообщение ----
 
   function appendMessage(data) {
+<<<<<<< HEAD
     data = normalizeMessagePayload(data);
+=======
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
     const id = data && (typeof data.id === 'number' || typeof data.id === 'string') ? String(data.id) : null;
     if (id && _seenMessageIds.has(id)) {
       return;
@@ -132,7 +142,10 @@ const ChatModule = (function () {
   }
 
   function renderMessage(data) {
+<<<<<<< HEAD
     data = normalizeMessagePayload(data);
+=======
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
     const container = document.getElementById('chatMessages');
     if (!container) return;
 
@@ -140,9 +153,15 @@ const ChatModule = (function () {
     const emptyState = container.querySelector('.empty-state');
     if (emptyState) emptyState.remove();
 
+<<<<<<< HEAD
     const author = data.display_name || data.user || data.username || data.author || 'Аноним';
     const text = data.content || data.message || '';
     const isMine = GLOBAL.currentUser && [GLOBAL.currentUser.username, GLOBAL.currentUser.display_name].filter(Boolean).includes(author);
+=======
+    const author = data.user || data.username || 'Аноним';
+    const text = data.content || data.message || '';
+    const isMine = GLOBAL.currentUser && author === GLOBAL.currentUser.username;
+>>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
 
     const time = data.timestamp
       ? new Date(data.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })

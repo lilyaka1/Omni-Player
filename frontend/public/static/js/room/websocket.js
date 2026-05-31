@@ -2,6 +2,8 @@
  * websocket.js — WebSocket соединение и диспетчер сообщений.
  * MVP RADIO-MODE: никакого is_playing inference, hasIsPlaying, player.applyState
  * с grace window. Только чистый current_track → play.
+ * MVP RADIO-MODE: никакого is_playing inference, hasIsPlaying, player.applyState
+ * с grace window. Только чистый current_track → play.
  *
  * Зависимости: globals.js (GLOBAL, showToast)
  */
@@ -100,7 +102,9 @@ const WSModule = (function () {
     const isLocalHost = host === '127.0.0.1' || host === 'localhost';
     const isViteDevPort = port === '5173' || port === '5174' || port === '5175';
     const base = (isLocalHost && isViteDevPort) ? `${proto}://${host}:5173` : `${proto}://${location.host}`;
+    const base = (isLocalHost && isViteDevPort) ? `${proto}://${host}:5173` : `${proto}://${location.host}`;
     const token = GLOBAL.token ? `?token=${encodeURIComponent(GLOBAL.token)}` : '';
+    const url = `${base}/ws/rooms/${GLOBAL.roomId}${token}`;
     const url = `${base}/ws/rooms/${GLOBAL.roomId}${token}`;
 
     console.log('[WS] Подключение к', url);
@@ -131,7 +135,9 @@ const WSModule = (function () {
     };
 
     ws.onerror = () => {
+    ws.onerror = () => {
       _isConnecting = false;
+      if (document.hidden || ws.__intentionalClose) return;
       if (document.hidden || ws.__intentionalClose) return;
       console.warn('[WS] Ошибка соединения, будет переподключение');
     };
@@ -150,6 +156,7 @@ const WSModule = (function () {
     };
   }
 
+  // ── Watchdog ────────────────────────────────────────────────────────────
   // ── Watchdog ────────────────────────────────────────────────────────────
   function startWatchdog() {
     if (_watchdogTimer) return;
@@ -178,7 +185,10 @@ const WSModule = (function () {
   }
 
   // ── Reconnect ───────────────────────────────────────────────────────────
+  // ── Reconnect ───────────────────────────────────────────────────────────
   function scheduleReconnect() {
+    if (document.hidden || document.visibilityState !== 'visible') return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     if (document.hidden || document.visibilityState !== 'visible') return;
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
     const delay = GLOBAL._wsReconnectDelay;
@@ -203,6 +213,8 @@ const WSModule = (function () {
     const reconnectNow = () => {
       if (document.hidden || document.visibilityState !== 'visible') return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) { closeIfOpen('offline'); return; }
+      if (document.hidden || document.visibilityState !== 'visible') return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) { closeIfOpen('offline'); return; }
       if (!GLOBAL.ws || GLOBAL.ws.readyState === WebSocket.CLOSED) {
         clearTimeout(GLOBAL._wsReconnectTimer);
         GLOBAL._wsReconnectDelay = 2000;
@@ -217,6 +229,20 @@ const WSModule = (function () {
     window.addEventListener('online', reconnectNow);
     window.addEventListener('offline', () => { closeIfOpen('offline'); });
     window.addEventListener('pagehide', () => { closeIfOpen('page-hide'); });
+    window.addEventListener('offline', () => { closeIfOpen('offline'); });
+    window.addEventListener('pagehide', () => { closeIfOpen('page-hide'); });
+  }
+
+  // ── Send ─────────────────────────────────────────────────────────────────
+  function flushPendingMessages() {
+    if (!GLOBAL.ws || GLOBAL.ws.readyState !== WebSocket.OPEN) return;
+    if (!_pendingMessages.length) return;
+    const batch = _pendingMessages;
+    _pendingMessages = [];
+    batch.forEach(payload => {
+      try { GLOBAL.ws.send(JSON.stringify(payload)); }
+      catch { _pendingMessages.push(payload); }
+    });
   }
 
   // ── Send ─────────────────────────────────────────────────────────────────
@@ -251,6 +277,7 @@ const WSModule = (function () {
   }
 
   // ── Dispatch ───────────────────────────────────────────────────────────
+  // ── Dispatch ───────────────────────────────────────────────────────────
   function dispatch(msg) {
     switch (msg.type) {
 
@@ -282,6 +309,7 @@ const WSModule = (function () {
 
       case 'chat':
         if (typeof ChatModule !== 'undefined') ChatModule.appendMessage(msg);
+        if (typeof ChatModule !== 'undefined') ChatModule.appendMessage(msg);
         break;
 
       case 'chat_history':
@@ -307,6 +335,11 @@ const WSModule = (function () {
         if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
           PlayerModule.applyState({ is_playing: true, current_track: GLOBAL.currentTrack });
         }
+        GLOBAL.isPlaying = true;
+        // Обновляем UI если есть PlayerModule
+        if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
+          PlayerModule.applyState({ is_playing: true, current_track: GLOBAL.currentTrack });
+        }
         break;
 
       case 'thumbnail_updated':
@@ -315,12 +348,21 @@ const WSModule = (function () {
 
       default:
         console.log('[WS] Неизвестный тип:', msg.type);
+        console.log('[WS] Неизвестный тип:', msg.type);
     }
   }
 
   // ── Handlers (Radio Mode) ─────────────────────────────────────────────────
+  // ── Handlers (Radio Mode) ─────────────────────────────────────────────────
   function handleRoomState(data) {
     if (!data) return;
+    const track = data.current_track || data.track || null;
+    const isPlaying = data.is_playing;
+    setGlobalFromTrack(track, isPlaying);
+    if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
+      PlayerModule.applyState(data);
+    }
+    // User role
     const track = data.current_track || data.track || null;
     const isPlaying = data.is_playing;
     setGlobalFromTrack(track, isPlaying);
@@ -335,6 +377,7 @@ const WSModule = (function () {
       GLOBAL.userRole = 'listener';
     }
     // Online count
+    // Online count
     updateOnlineCount(data.users || 0);
   }
 
@@ -344,10 +387,15 @@ const WSModule = (function () {
     const isPlaying = data.is_playing;
     setGlobalFromTrack(track, isPlaying);
     if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
+    const track = data.current_track || data.track || null;
+    const isPlaying = data.is_playing;
+    setGlobalFromTrack(track, isPlaying);
+    if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
       PlayerModule.applyState(data);
     }
   }
 
+  function handleTrackChanged(msg) {
   function handleTrackChanged(msg) {
     const track = msg.track || (msg.data && (msg.data.current_track || msg.data.track)) || null;
     const base = msg.data || {};
@@ -413,6 +461,23 @@ const WSModule = (function () {
     }
   }
 
+  function handleThumbnailUpdated(msg) {
+    if (!msg) return;
+    const trackId = Number(msg.track_id);
+    const thumb = msg.thumbnail || '';
+    if (!trackId || !thumb) return;
+    if (GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) === trackId) {
+      GLOBAL.currentTrack = { ...GLOBAL.currentTrack, thumbnail: thumb };
+      if (typeof PlayerModule !== 'undefined') {
+        PlayerModule.applyState({ current_track: GLOBAL.currentTrack });
+      }
+    }
+    if (typeof QueueModule !== 'undefined' && typeof QueueModule.loadQueue === 'function') {
+      QueueModule.loadQueue();
+    }
+  }
+
+  // ── Public API ────────────────────────────────────────────────────────────
   function handleThumbnailUpdated(msg) {
     if (!msg) return;
     const trackId = Number(msg.track_id);

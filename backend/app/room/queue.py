@@ -23,6 +23,11 @@ def get_room_state(db, room) -> dict:
         current = db.query(RoomTrack).filter(RoomTrack.id == room.now_playing_track_id).first()
     # If there is no currently playing track, return an empty state.
     if not current:
+        current = None
+    else:
+        current = db.query(RoomTrack).filter(RoomTrack.id == room.now_playing_track_id).first()
+    # If there is no currently playing track, return an empty state.
+    if not current:
         return {
             "current_track_id": None,
             "current_track": None,
@@ -92,7 +97,55 @@ def get_room_state(db, room) -> dict:
             "updated_at": session_obj.updated_at.isoformat() if session_obj.updated_at else None,
         }
 
+
+    # Build queue snapshot with queue_state and asset status
+    queue_rows = (
+        db.query(RoomTrack)
+        .filter(RoomTrack.room_id == room.id)
+        .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
+        .all()
+    )
+    queue = []
+    for r in queue_rows:
+        asset_status = None
+        try:
+            t = db.query(Track).filter(Track.source == r.source, Track.source_track_id == r.source_track_id).first()
+            if t:
+                a = db.query(TrackAsset).filter(TrackAsset.track_id == t.id).order_by(TrackAsset.updated_at.desc()).first()
+                if a:
+                    asset_status = a.status
+        except Exception:
+            asset_status = None
+
+        queue.append({
+            "id": r.id,
+            "title": r.title,
+            "artist": r.artist,
+            "duration": r.duration,
+            "thumbnail": r.thumbnail or '',
+            "genre": r.genre or '',
+            "order": r.order,
+            "added_by_id": r.added_by_id,
+            "queue_state": getattr(r, 'queue_state', None),
+            "asset_status": asset_status,
+        })
+
+    # Attach playback_session snapshot if exists
+    session_obj = db.query(PlaybackSession).filter(PlaybackSession.room_id == room.id).first()
+    session_dict = None
+    if session_obj:
+        session_dict = {
+            "current_queue_item_id": session_obj.current_queue_item_id,
+            "playback_state": session_obj.playback_state,
+            "started_at": session_obj.started_at.isoformat() if session_obj.started_at else None,
+            "expected_end_at": session_obj.expected_end_at.isoformat() if session_obj.expected_end_at else None,
+            "playback_position": session_obj.playback_position,
+            "generation": session_obj.generation,
+            "updated_at": session_obj.updated_at.isoformat() if session_obj.updated_at else None,
+        }
+
     return {
+        "current_track_id": track.id if track else None,
         "current_track_id": track.id if track else None,
         "current_track": {
             "id": track.id,
@@ -101,6 +154,7 @@ def get_room_state(db, room) -> dict:
             "duration": track.duration,
             "thumbnail": track.thumbnail or "",
             "genre": track.genre or "",
+        } if track else None,
         } if track else None,
         "position": elapsed,
         "server_time": datetime.utcnow().isoformat(),
@@ -126,8 +180,28 @@ async def advance_track(room_id: int, db_session_factory) -> bool:
             return False
 
         # Build track data for broadcast
+    # Delegate advance to playback.controller to keep single authority
+    try:
+        from app.playback.controller import advance_playback
+
+        next_id = await asyncio.to_thread(advance_playback, room_id)
+        if not next_id:
+            return False
+
+        # Build track data for broadcast
         db = db_session_factory()
         try:
+            nt = db.query(RoomTrack).filter(RoomTrack.id == next_id).first()
+            if not nt:
+                return False
+            track_data = {
+                "id": nt.id,
+                "title": nt.title,
+                "artist": nt.artist,
+                "duration": nt.duration,
+                "thumbnail": nt.thumbnail or '',
+                "genre": nt.genre or '',
+            }
             nt = db.query(RoomTrack).filter(RoomTrack.id == next_id).first()
             if not nt:
                 return False
@@ -144,6 +218,8 @@ async def advance_track(room_id: int, db_session_factory) -> bool:
 
         await broadcast_track_changed(room_id, track_data)
         return True
+        await broadcast_track_changed(room_id, track_data)
+        return True
     except Exception as e:
         print(f"❌ advance_track error: {e}")
         import traceback; traceback.print_exc()
@@ -155,6 +231,7 @@ async def peek_next_track(room_id: int, db_session_factory) -> dict:
     Получает информацию о следующем треке БЕЗ изменения состояния.
     Используется для prefetch stream URL.
     """
+    db = db_session_factory()
     db = db_session_factory()
     def _peek_sync():
         try:
@@ -196,6 +273,7 @@ async def peek_next_track(room_id: int, db_session_factory) -> dict:
 
             if next_track:
                 # Do not expose filesystem paths
+                # Do not expose filesystem paths
                 return {
                     "id": next_track.id,
                     "source_track_id": next_track.source_track_id,
@@ -232,6 +310,8 @@ async def broadcast_track_changed(room_id: int, track: dict) -> None:
 
         # ── FIX: removed is_playing / is_live from broadcast state.
         # Radio-mode rule: stream endpoint depends ONLY on now_playing_track_id.
+        # ── FIX: removed is_playing / is_live from broadcast state.
+        # Radio-mode rule: stream endpoint depends ONLY on now_playing_track_id.
         if room_id in manager.room_states:
             manager.room_states[room_id].update({
                 "current_track": track_dict,
@@ -240,6 +320,7 @@ async def broadcast_track_changed(room_id: int, track: dict) -> None:
                 "last_update_time": time.time(),
             })
 
+        await manager.broadcast_event(room_id, 'track_changed', {"track": track_dict})
         await manager.broadcast_event(room_id, 'track_changed', {"track": track_dict})
         print(f"📡 Room {room_id}: broadcast track_changed → '{track['title']}'")
 
