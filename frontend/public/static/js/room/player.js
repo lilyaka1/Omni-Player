@@ -140,12 +140,8 @@ const PlayerModule = (function () {
       seekTo(ratio * GLOBAL.currentDuration);
     });
 
-    if (volumeSlider) {
-      volumeSlider.value = (audio?.volume ?? 0.8) * 100;
-      volumeSlider.addEventListener('input', () => {
-        if (audio) audio.volume = volumeSlider.value / 100;
-      });
-    }
+    // Volume slider is initialized in stream.js after streamAudio is created
+    // (see stream.js _getOrCreateStreamAudio() function)
 
     // Progress update для non-room mode
     audio?.addEventListener('timeupdate', () => {

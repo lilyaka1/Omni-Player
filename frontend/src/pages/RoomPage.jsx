@@ -98,6 +98,13 @@ export default function RoomPage() {
         const p = document.getElementById('eqPanel');
         if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
       });
+
+      // Try to load queue if already available from WS
+      console.log('[ROOM] All room scripts loaded, checking for queue updates');
+      if (typeof window.QueueModule !== 'undefined' && typeof window.QueueModule.loadQueue === 'function') {
+        console.log('[ROOM] QueueModule available, loading queue');
+        window.QueueModule.loadQueue();
+      }
     }
 
     initRoom().catch((err) => console.error('Room init failed', err));
@@ -193,7 +200,7 @@ export default function RoomPage() {
               <button className="btn btn-icon glass-tertiary" id="clearQueueBtn" title="Очистить очередь" style={{ width: 30, height: 30, fontSize: '0.75rem' }}><i className="fa-solid fa-trash-can" /></button>
             </div>
 
-            <div className="queue-list" id="queueList"><div className="empty-state"><i className="fa-solid fa-music" /><p>Очередь пуста</p></div></div>
+            <div className="queue-list" id="queueList" data-queue-items="[]"><div className="empty-state"><i className="fa-solid fa-music" /><p>Очередь пуста</p></div></div>
             <div className="add-track-row"><input className="input" type="text" id="addTrackUrl" placeholder="Вставьте ссылку YouTube/SoundCloud" /><button className="btn btn-accent" id="addTrackBtn"><i className="fa-solid fa-plus" /></button></div>
           </div>
 

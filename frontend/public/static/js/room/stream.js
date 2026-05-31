@@ -53,6 +53,18 @@ function _getOrCreateStreamAudio() {
     }
   });
   console.log('✅ streamAudio element created');
+  
+  // Initialize volume slider now that streamAudio exists
+  var volumeSlider = document.getElementById('volumeSlider');
+  if (volumeSlider) {
+    console.log('[STREAM] Initializing volume slider with streamAudio');
+    volumeSlider.value = (_streamAudio.volume ?? 0.8) * 100;
+    volumeSlider.addEventListener('input', () => {
+      console.log('[STREAM] volume changed via slider to', volumeSlider.value);
+      _streamAudio.volume = volumeSlider.value / 100;
+    });
+  }
+  
   return _streamAudio;
 }
 

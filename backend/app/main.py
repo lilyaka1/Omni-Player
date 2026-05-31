@@ -147,3 +147,4 @@ async def health():
 @app.get("/health")
 async def legacy_health():
     return {"status": "ok", "version": "1.0.0"}
+

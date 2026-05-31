@@ -56,6 +56,11 @@ export default function HomePage() {
   useEffect(() => {
     loadCurrentUser();
     loadRooms();
+
+    // Auto-refresh rooms every 5 seconds to update listener counts
+    const interval = setInterval(loadRooms, 5000);
+
+    return () => clearInterval(interval);
   }, []);
 
   // Reload user when returning to home or after profile edit
