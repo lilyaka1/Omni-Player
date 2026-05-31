@@ -293,25 +293,23 @@ const QueueModule = (function () {
     bindUI();
     loadQueue();
     
-    // Aggressively watch and restore queue if React clears it
-    let lastQueueLength = 0;
-    setInterval(() => {
-      const list = document.getElementById('queueList');
-      if (!list) return;
+    // Watch for React re-rendering that might clear queue
+    const list = document.getElementById('queueList');
+    if (list && typeof MutationObserver !== 'undefined') {
+      const observer = new MutationObserver(() => {
+        // If queueList was cleared by React, restore our queue
+        if (_queue.length > 0 && list.children.length === 1 && list.querySelector('.empty-state')) {
+          console.log('[QUEUE] Detected React overwrote queue, restoring');
+          render();
+        }
+      });
       
-      const isShowingEmpty = list.querySelector('.empty-state') !== null;
-      const shouldShowQueue = _queue && _queue.length > 0;
-      
-      if (shouldShowQueue && isShowingEmpty) {
-        console.log('[QUEUE] Detected React cleared queue, re-rendering', _queue.length, 'tracks');
-        render();
-      }
-      
-      if (lastQueueLength !== _queue.length) {
-        console.log('[QUEUE] Queue changed from', lastQueueLength, 'to', _queue.length, 'items');
-        lastQueueLength = _queue.length;
-      }
-    }, 500);
+      observer.observe(list, { 
+        childList: true, 
+        subtree: true,
+        innerHTML: true 
+      });
+    }
   }
 
   if (document.readyState === 'loading') {
