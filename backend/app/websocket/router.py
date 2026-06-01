@@ -11,6 +11,7 @@ from app.websocket.handlers import (
     handle_chat,
     handle_track_change,
     handle_playback_control,
+    handle_playback_ended,
 )
 from app.voice_inserts.ws_handlers import handle_insert_message
 
@@ -49,6 +50,9 @@ async def websocket_endpoint(
             elif msg_type == "playback_control":
                 logger.info(f"WS [{room_id}] playback_control data={json.dumps(data, default=str)}")
                 await handle_playback_control(room_id, data)
+            elif msg_type == "playback_ended":
+                logger.info(f"WS [{room_id}] playback_ended data={json.dumps(data, default=str)}")
+                await handle_playback_ended(room_id, data)
             elif msg_type == "reorder_queue":
                 from app.websocket.handlers import handle_reorder_queue
                 await handle_reorder_queue(room_id, data)

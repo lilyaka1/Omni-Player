@@ -14,7 +14,6 @@ const WSModule = (function () {
   let _pendingMessages = [];
   let _lastMessageAt = 0;
   let _watchdogTimer = null;
-<<<<<<< HEAD
   const _staleTimeoutMs = 60000;
 
   function syncRoomStreamFromPayload(payload) {
@@ -83,8 +82,6 @@ const WSModule = (function () {
     streamAudio.addEventListener('canplay', flushPendingSeek);
     streamAudio.__roomTrackSyncBound = true;
   }
-=======
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
 
   // ── connect ────────────────────────────────────────────────────────────────
   function connect() {
@@ -120,14 +117,10 @@ const WSModule = (function () {
       flushPendingMessages();
       startWatchdog();
       ws._pingInterval = setInterval(() => {
-<<<<<<< HEAD
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'ping' }));
           _lastMessageAt = Date.now();
         }
-=======
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
       }, 25000);
     };
 
@@ -272,13 +265,10 @@ const WSModule = (function () {
 
       case 'track_changed':
         handleTrackChanged(msg);
-<<<<<<< HEAD
         break;
 
       case 'track_sync':
         handleTrackSync(msg);
-=======
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
         break;
 
       case 'queue_updated':
@@ -372,7 +362,6 @@ const WSModule = (function () {
     setGlobalFromTrack(track, isPlaying);
     if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
       PlayerModule.applyState(normalized);
-<<<<<<< HEAD
     }
   }
 
@@ -398,8 +387,6 @@ const WSModule = (function () {
         }
       });
       GLOBAL.isPlaying = true;
-=======
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
     }
   }
 

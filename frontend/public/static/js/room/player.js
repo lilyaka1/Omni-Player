@@ -36,7 +36,6 @@ const PlayerModule = (function () {
       return '/stream/room/' + GLOBAL.roomId + '/stream';
     }
     return '';
-<<<<<<< HEAD
   }
 
   function syncRoomStreamPosition(streamAudio, position, trackId) {
@@ -80,8 +79,6 @@ const PlayerModule = (function () {
     streamAudio.addEventListener('loadedmetadata', flushPendingSeek);
     streamAudio.addEventListener('canplay', flushPendingSeek);
     streamAudio.__roomSeekListenerBound = true;
-=======
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
   }
 
   function ensureProgressTicker() {
@@ -143,17 +140,8 @@ const PlayerModule = (function () {
       seekTo(ratio * GLOBAL.currentDuration);
     });
 
-<<<<<<< HEAD
     // Volume slider is initialized in stream.js after streamAudio is created
     // (see stream.js _getOrCreateStreamAudio() function)
-=======
-    if (volumeSlider) {
-      volumeSlider.value = (audio?.volume ?? 0.8) * 100;
-      volumeSlider.addEventListener('input', () => {
-        if (audio) audio.volume = volumeSlider.value / 100;
-      });
-    }
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
 
     // Progress update для non-room mode
     audio?.addEventListener('timeupdate', () => {
@@ -213,10 +201,7 @@ const PlayerModule = (function () {
     const prevId = GLOBAL.currentTrack && GLOBAL.currentTrack.id;
     const incomingId = track.id;
     const trackChanged = !prevId || prevId !== incomingId;
-<<<<<<< HEAD
     const shouldPlay = data?.is_playing !== false;
-=======
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
 
     GLOBAL.currentTrack = track;
     GLOBAL.currentDuration = Number(track.duration || 0) || 0;
@@ -233,7 +218,6 @@ const PlayerModule = (function () {
     if (isRoomMode()) {
       var streamAudio = document.getElementById('streamAudio');
       var url = getRoomStreamUrl();
-<<<<<<< HEAD
         var absUrl = new URL(url, window.location.href).href;
       var serverPosition = Number(data?.position);
       if (streamAudio) {
@@ -246,20 +230,12 @@ const PlayerModule = (function () {
           syncRoomStreamPosition(streamAudio, serverPosition, incomingId);
         }
         if (shouldPlay) {
-=======
-      if (streamAudio) {
-        if (streamAudio.src !== url || trackChanged) {
-          streamAudio.pause();
-          streamAudio.src = url;
-          streamAudio.load();
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
           streamAudio.play().catch(function (err) {
             if (err && err.name === 'NotAllowedError') {
               window._pendingStreamUrl = url;
               if (typeof window.showPlayPrompt === 'function') window.showPlayPrompt();
             }
           });
-<<<<<<< HEAD
         } else {
           streamAudio.pause();
         }
@@ -275,16 +251,6 @@ const PlayerModule = (function () {
       GLOBAL.isPlaying = shouldPlay;
       setPlayIcon(shouldPlay);
       artworkContainer?.classList.toggle('spinning', shouldPlay);
-=======
-        }
-      } else {
-        // stream.js ещё не создал элемент — попросим
-        autoConnectStream();
-      }
-      GLOBAL.isPlaying = true;
-      setPlayIcon(true);
-      artworkContainer?.classList.add('spinning');
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
       return;
     }
 
@@ -299,11 +265,7 @@ const PlayerModule = (function () {
         if (!src) { showToast('У трека нет stream URL', 'error'); return; }
         var abs = new URL(src, window.location.href).href;
         if (audio.src !== abs || trackChanged) {
-<<<<<<< HEAD
             audio.src = abs;
-=======
-          audio.src = src;
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
           audio.load();
         }
         audio.play().catch(() => {});
@@ -367,17 +329,11 @@ const PlayerModule = (function () {
         showToast('Управление доступно только для админа', 'error');
         return;
       }
-<<<<<<< HEAD
-=======
-      // В radio mode нет local play/pause — всё решает now_playing_track_id на бэкенде.
-      // Просто переключаем стрим (connect/disconnect).
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
       var streamAudio = document.getElementById('streamAudio');
       if (streamAudio && !streamAudio.paused && streamAudio.src) {
         streamAudio.pause();
         GLOBAL.isPlaying = false;
         setPlayIcon(false);
-<<<<<<< HEAD
         artworkContainer?.classList.remove('spinning');
         WSModule.sendWS('playback_control', { action: 'pause' });
       } else {
@@ -392,10 +348,6 @@ const PlayerModule = (function () {
         } else {
           autoConnectStream();
         }
-=======
-      } else {
-        autoConnectStream();
->>>>>>> d4dd9ca612c6180feed89c9f9ee3fe56f157947c
       }
       return;
     }

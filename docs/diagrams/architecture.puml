@@ -1,0 +1,71 @@
+@startuml OmniPlayer_Architecture
+!theme plain
+
+title Архитектурная диаграмма OmniPlayer
+
+skinparam componentStyle uml2
+
+package "Frontend (React + Vite)" {
+  [SPA Приложение] as FE
+  [Navbar] as Nav
+  [RoomPage] as Room
+  [PlayerControls] as Player
+  [TrackList] as TrackL
+  [Chat] as ChatComp
+  
+  FE --> Nav
+  FE --> Room
+  Room --> Player
+  Room --> TrackL
+  Room --> ChatComp
+}
+
+package "Backend (FastAPI + Uvicorn)" {
+  [REST API] as API
+  [WebSocket Gateway] as WS
+  [Auth Service] as Auth
+  [Room Service] as RoomSvc
+  [Playback Controller] as PlayCtrl
+  [Voice Insert Service] as VoiceSvc
+  [Audit Middleware] as Audit
+  
+  API --> Auth
+  API --> RoomSvc
+  API --> PlayCtrl
+  WS --> RoomSvc
+  WS --> PlayCtrl
+  WS --> ChatComp
+  PlayCtrl --> VoiceSvc
+  Audit --> [Database]
+}
+
+package "Database (PostgreSQL)" {
+  database "users" as Users
+  database "rooms" as Rooms
+  database "room_tracks" as RoomTracks
+  database "tracks" as Tracks
+  database "messages" as Messages
+  database "user_rooms" as UserRooms
+  database "audit_logs" as AuditLogs
+}
+
+package "External Services" {
+  [SoundCloud API] as SC
+  [TTS/RVC Service] as TTS
+}
+
+FE -down-> API : HTTP/HTTPS
+FE -down-> WS : WebSocket
+API -down-> Users
+API -down-> Rooms
+API -down-> Tracks
+RoomSvc -down-> RoomTracks
+RoomSvc -down-> UserRooms
+PlayCtrl -down-> RoomTracks
+ChatComp -down-> Messages
+Audit -down-> AuditLogs
+
+RoomSvc --> SC : Интеграция
+VoiceSvc --> TTS : Генерация голоса
+
+@enduml

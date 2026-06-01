@@ -206,8 +206,6 @@ async def upload_local_files(
             local_file_path=str(stored_path),
             processing_status='processing',
             processing_progress=0,
-            processing_status='processing',
-            processing_progress=0,
         )
         db.add(track)
         db.flush()

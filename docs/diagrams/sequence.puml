@@ -1,0 +1,110 @@
+@startuml OmniPlayer_Sequence_Playback
+!theme plain
+
+title Диаграмма последовательности запуска воспроизведения
+
+actor Пользователь as User
+participant "Frontend\n(RoomPage)" as FE
+participant "REST API" as API
+participant "RoomService" as RoomSvc
+participant "PlaybackController" as PlayCtrl
+participant "RoomGateway" as Gateway
+participant "WebSocket" as WS
+participant "PostgreSQL" as DB
+participant "VoiceInsertService" as Voice
+
+== Инициализация комнаты ==
+
+User -> FE : Открывает комнату
+FE -> API : GET /rooms/{id}
+API -> DB : SELECT room, users
+DB --> API : Данные комнаты
+API --> FE : Room data + participants
+FE -> WS : Подключение к комнате
+FE -> FE : Инициализация плеера
+
+== Добавление трека ==
+
+User -> FE : Добавить трек (ссылка/файл)
+FE -> API : POST /rooms/{id}/tracks
+API -> RoomSvc : add_track()
+RoomSvc -> RoomSvc : Валидация URL
+RoomSvc -> RoomSvc : Получение метаданных
+RoomSvc -> DB : INSERT track
+RoomSvc -> DB : INSERT room_track
+RoomSvc --> API : Track created
+API --> FE : 201 Created
+FE -> FE : Обновление UI очереди
+Gateway -> WS : broadcast queue_update
+
+== Запуск воспроизведения (Host) ==
+
+User -> FE : Нажать Play
+FE -> API : POST /rooms/{id}/play
+API -> PlayCtrl : start_playback()
+PlayCtrl -> DB : UPDATE room\nSET playback_state='playing'
+PlayCtrl -> DB : SELECT now_playing_track
+DB --> PlayCtrl : Track data
+PlayCtrl --> Gateway : playback_started
+Gateway -> WS : broadcast "play" event
+
+group Все клиенты
+  WS --> FE : play event
+  FE -> FE : Запуск воспроизведения
+  FE -> Voice : Запрос голосовой вставки
+  Voice -> Voice : TTS/RVC генерация
+  Voice --> FE : Audio blob
+  FE -> FE : Воспроизведение трека + голос
+end
+
+== Синхронизация между клиентами ==
+
+loop Каждые 5 секунд
+  FE -> API : POST /rooms/{id}/sync
+  API -> PlayCtrl : get_current_position()
+  PlayCtrl -> DB : SELECT playback_position\nWHERE generation = N
+  DB --> PlayCtrl : Position
+  PlayCtrl --> API : Sync data
+  API --> FE : {position, state, track}
+  FE -> FE : Корректировка если drift > 500ms
+end
+
+== Смена трека ==
+
+alt Когда трек заканчивается
+  FE -> API : POST /rooms/{id}/next
+  API -> PlayCtrl : advance_playback()
+  PlayCtrl -> DB : UPDATE now_playing\n-> следующий трек
+  PlayCtrl -> DB : UPDATE playback_generation + 1
+  PlayCtrl --> Gateway : track_change event
+  Gateway -> WS : broadcast new track
+  
+  alt Voice inserts enabled
+    Gateway -> Voice : synthesize_track_name()
+    Voice --> Gateway : Audio
+    Gateway -> WS : broadcast voice_insert
+  end
+  
+  WS --> FE : track_change event
+  FE -> FE : Загрузка нового трека
+end
+
+== Пауза ==
+
+User -> FE : Нажать Pause
+FE -> API : POST /rooms/{id}/pause
+API -> PlayCtrl : pause_playback()
+PlayCtrl -> DB : UPDATE playback_state='paused'
+PlayCtrl --> Gateway : playback_paused
+Gateway -> WS : broadcast "pause" event
+WS --> FE : pause event
+FE -> FE : Пауза плеера
+
+== Отключение клиента ==
+
+User -> FE : Закрыть вкладку
+FE -> WS : disconnect
+WS -> WS : cleanup
+Gateway -> DB : UPDATE user_room\nSET is_active=false
+
+@enduml

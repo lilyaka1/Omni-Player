@@ -327,6 +327,10 @@ def start_playback(room_id: int) -> Optional[int]:
     Если очередь пуста — ничего не делать (return None).
     Иначе — взять первый трек по order и записать его ID.
 
+    Selection is driven by RoomTrack.queue_state only — NOT by Track/TrackAsset.
+    With on-demand download the next track is fetched lazily when it becomes
+    current, so gating selection on a 'ready' asset would deadlock.
+
     Returns:
         ID трека который играет, либо None (очередь пуста).
     """
@@ -363,49 +367,9 @@ def start_playback(room_id: int) -> Optional[int]:
                     on_playback_event(room_id, "resumed", {"track_id": room.now_playing_track_id})
                 return room.now_playing_track_id
 
-            # Deterministic selector: pick next queue item where queue_state
-            # indicates readiness (ready or waiting_download) AND there exists
-            # a TrackAsset in status 'ready' for the corresponding Track.
-            # Join RoomTrack -> Track (by source/source_track_id) -> TrackAsset.
-            # Case-insensitive source match to handle SOUNDCLOUD vs soundcloud mismatch.
-            first = (
-                db.query(RoomTrack)
-                .join(Track, and_(func.lower(Track.source) == func.lower(RoomTrack.source), Track.source_track_id == RoomTrack.source_track_id))
-                .join(TrackAsset, TrackAsset.track_id == Track.id)
-                .filter(
-                    RoomTrack.room_id == room_id,
-                    RoomTrack.queue_state.in_(['ready', 'waiting_download']),
-                    TrackAsset.status == 'ready',
-                )
-                .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-                .first()
-            )
-            # Fallback: if no Track/TrackAsset pair found, fall back to direct
-            # RoomTrack stream_url check (for tracks that have direct stream_url)
-            if not first:
-                first = (
-                    db.query(RoomTrack)
-                    .filter(
-                        RoomTrack.room_id == room_id,
-                        RoomTrack.queue_state == 'ready',
-                        RoomTrack.stream_url != '',
-                        RoomTrack.stream_url != None,
-                    )
-                    .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-                    .first()
-                )
-            # Fallback 2: pick any ready track even without stream_url
-            # (stream will be resolved at playback time via yt-dlp/provider)
-            if not first:
-                first = (
-                    db.query(RoomTrack)
-                    .filter(
-                        RoomTrack.room_id == room_id,
-                        RoomTrack.queue_state == 'ready',
-                    )
-                    .order_by(RoomTrack.order.nullsfirst(), RoomTrack.id)
-                    .first()
-                )
+            # Queue-state-only selector — no TrackAsset gate.
+            # Pick next item where queue_state in (ready, waiting_download).
+            first = _select_ready_roomtrack(db, room_id)
             if not first:
                 return None
 

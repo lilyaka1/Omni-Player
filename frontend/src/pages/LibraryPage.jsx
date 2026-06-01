@@ -619,7 +619,7 @@ export default function LibraryPage() {
               <i className="fa-solid fa-door-open" /> Комнаты
             </button>
             <button className="nav-item active">
-              <i className="fa-solid fa-music" /> Локальный плеер
+              <i className="fa-solid fa-music" /> Медиотека
             </button>
             <button className="nav-item" id="themeToggle">
               <i className="fa-solid fa-moon" id="themeIcon" /> Тема
@@ -630,7 +630,7 @@ export default function LibraryPage() {
         <main className="library-main">
           <div className="page-header-wrap">
             <div>
-              <h2>Локальный плеер</h2>
+              <h2>Медиотека</h2>
               <p className="text-sm text-muted" style={{ marginTop: 2 }}>Слушайте сохранённые треки как в обычном аудиоплеере</p>
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

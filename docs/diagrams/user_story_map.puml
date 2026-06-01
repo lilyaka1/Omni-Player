@@ -1,0 +1,90 @@
+@startuml OmniPlayer_UserStoryMap
+!theme plain
+
+title UserStoryMap OmniPlayer
+
+left to right direction
+
+skinparam packageStyle rectangle
+
+header **UserStoryMap: Путь пользователя от входа до воспроизведения**
+
+partition "🎯 Discovery\n(Открытие и вход)" {
+  [:Вход на сайт] as US1
+  [:Регистрация] as US2
+  [:Вход в систему] as US3
+  [:Просмотр списка комнат] as US4
+}
+
+partition "🏠 Home / Library\n(Библиотека)" {
+  [:Просмотр библиотеки треков] as US5
+  [:Загрузка аудиофайла] as US6
+  [:Поиск трека] as US7
+  [:Просмотр профиля] as US8
+}
+
+partition "🚪 Room Lifecycle\n(Создание и вход в комнату)" {
+  [:Создание комнаты] as US9
+  [:Настройка параметров комнаты] as US10
+  [:Присоединение к комнате] as US11
+  [:Ввод пароля (если приватная)] as US12
+  [:Просмотр участников] as US13
+}
+
+partition "🎵 Playback\n(Воспроизведение)" {
+  [:Добавление трека в очередь] as US14
+  [:Удаление трека из очереди] as US15
+  [:Изменение порядка очереди] as US16
+  [:Запуск воспроизведения] as US17
+  [:Пауза/Возобновление] as US18
+  [:Пропуск трека] as US19
+  [:Синхронизация с другими] as US20
+}
+
+partition "💬 Communication\n(Коммуникация)" {
+  [:Отправка сообщения в чат] as US21
+  [:Просмотр истории чата] as US22
+  [:Включение голосовых вставок] as US23
+}
+
+partition "⚙️ Admin\n(Администрирование)" {
+  [:Модерация чата] as US24
+  [:Блокировка пользователя] as US25
+  [:Управление правами участников] as US26
+  [:Просмотр аудита] as US27
+}
+
+US1 --> US2
+US1 --> US3
+US3 --> US4
+US4 --> US9
+US4 --> US11
+US9 --> US10
+US11 --> US12
+US11 --> US13
+US13 --> US14
+US14 --> US15
+US14 --> US16
+US16 --> US17
+US17 --> US18
+US17 --> US19
+US19 --> US20
+US14 --> US21
+US21 --> US22
+US17 --> US23
+US10 ..> US24
+US24 --> US25
+US25 --> US26
+US26 --> US27
+
+legend right
+  | Цвет | Этап |
+  |<back:#lightblue>Discovery</back>| Знакомство с сервисом |
+  |<back:#lightgreen>Home/Library</back>| Личная библиотека |
+  |<back:#lightyellow>Room Lifecycle</back>| Работа с комнатами |
+  |<back:#lightcoral>Playback</back>| Воспроизведение |
+  |<back:#lavender>Communication</back>| Общение |
+  |<back:#lightgray>Admin</back>| Управление |
+endlegend
+
+@enduml
