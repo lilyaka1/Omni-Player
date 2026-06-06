@@ -226,6 +226,12 @@ class RoomTimelineManager:
         Восстановить timeline state из DB.
 
         Используется при старте приложения или reconnect.
+        Восстанавливает позицию из Room.playback_position.
+        
+        IMPORTANT: При восстановлении после F5/рестарта ВСЕГДА используем
+        current time как started_at, потому что accumulated_offset уже содержит
+        сохраненную позицию. Если использовать старое playback_started_at,
+        позиция будет рассчитана неправильно (огромное число).
         """
         db = SessionLocal()
         try:
@@ -239,19 +245,20 @@ class RoomTimelineManager:
             if not track:
                 return None
 
-            # Если playback_started_at нет — просто стартуем с 0
-            if room.playback_started_at:
-                started_ts = room.playback_started_at.timestamp()
-                # accumulated = 0, started_at = запись из БД
-                state = TrackTimelineState(
-                    track_id=track.id,
-                    started_at=started_ts,
-                    accumulated_offset=0.0,
-                    is_playing=room.is_playing,
-                )
-            else:
-                # Нет времени старта — начинаем с сейчас
-                state = self.start_track(room_id, track.id)
+            # Восстанавливаем позицию из БД
+            saved_position = room.playback_position or 0.0
+            
+            # ALWAYS use current time as started_at when restoring from DB.
+            # The accumulated_offset contains the saved position, so:
+            #   get_position() = (now - now) + accumulated_offset = saved_position ✓
+            # If we used old playback_started_at, position would be wrong:
+            #   get_position() = (now - old_time) + saved_position = HUGE NUMBER ✗
+            state = TrackTimelineState(
+                track_id=track.id,
+                started_at=time.time(),
+                accumulated_offset=saved_position,
+                is_playing=room.is_playing,
+            )
 
             return state
         finally:
@@ -264,15 +271,37 @@ class RoomTimelineManager:
         Это делается при:
         - advance_track (новый трек)
         - pause/resume
-        - периодически для recovery
+        - periodically для recovery
 
         Возвращает True если успешно.
         """
         # Use controller as authoritative mutator to keep single source of truth
         try:
-            from app.playback.controller import set_now_playing
-            # set_now_playing will write now_playing and playback_started_at atomically
-            ok = set_now_playing(room_id, state.track_id)
+            from app.playback.controller import update_playback_session
+            from app.database.session import SessionLocal
+            from app.database.models import Room
+            
+            # Получаем текущую позицию
+            now = time.time()
+            position = state.get_position(now)
+            
+            # Сохраняем позицию в Room.playback_position
+            db = SessionLocal()
+            try:
+                room = db.query(Room).filter(Room.id == room_id).first()
+                if room:
+                    room.playback_position = position
+                    db.commit()
+            finally:
+                db.close()
+            
+            # Также обновляем playback session
+            ok = update_playback_session(
+                room_id, 
+                'playing' if state.is_playing else 'stopped',
+                current_queue_item_id=state.track_id,
+                playback_position=position
+            )
             return bool(ok)
         except Exception as e:
             print(f"timeline persist error (controller): {e}")

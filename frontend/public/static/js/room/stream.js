@@ -9,7 +9,7 @@ var _streamConnectInFlight = false;
 var _streamConnectUrl = '';
 var _streamEndAdvanceRequestedAt = 0;
 
-// ── Audio элемент ─────────────────────────────────────────────────────────────
+  // ── Audio элемент ─────────────────────────────────────────────────────────────
 function _getOrCreateStreamAudio() {
   if (_streamAudio) return _streamAudio;
   _streamAudio = document.getElementById('streamAudio');
@@ -23,19 +23,18 @@ function _getOrCreateStreamAudio() {
     if (!_streamAudio.src || _streamAudio.src === window.location.href) return;
     console.warn('⚠️ streamAudio error code=' + (_streamAudio.error ? _streamAudio.error.code : '?'));
   });
+  // Убран ended→next: сервер сам переключает через loop. Клиент только переподключается.
   _streamAudio.addEventListener('ended', function () {
-    console.log('ℹ️ streamAudio ended');
-    // SECURITY FIX: Client MUST NOT trigger next track via WS.
-    // The server controls the queue and decides when to advance.
-    // Client only reports the ended event for UI state updates.
-    if (typeof WSModule !== 'undefined' && WSModule && typeof WSModule.sendWS === 'function') {
-      WSModule.sendWS('playback_ended', { track_id: GLOBAL && GLOBAL.currentTrack ? GLOBAL.currentTrack.id : null });
+    console.log('ℹ️ streamAudio ended → re-connecting');
+    // Перезагружаем тот же URL — сервер уже переключил на новый трек
+    if (_streamAudio) {
+      _streamAudio.load();
+      _streamAudio.play().catch(function(){});
     }
   });
   _streamAudio.addEventListener('loadedmetadata', function () {
     var pending = window._pendingRoomStreamSeek;
     if (!pending) return;
-    // RELAXED track check after F5: only skip if GLOBAL has a DIFFERENT track
     if (pending.trackId && GLOBAL && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== Number(pending.trackId)) return;
     try {
       var duration = Number(_streamAudio.duration);
@@ -52,41 +51,7 @@ function _getOrCreateStreamAudio() {
       console.warn('⚠️ streamAudio seek failed:', err);
     }
   });
-
-  // FIX: After F5, the stream may not fire loadedmetadata if it's a live HTTP
-  // stream. Also listen for 'canplay' and 'timeupdate' as fallbacks.
-  _streamAudio.addEventListener('canplay', function () {
-    var pending = window._pendingRoomStreamSeek;
-    if (!pending) return;
-    if (pending.trackId && GLOBAL && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== Number(pending.trackId)) return;
-    try {
-      var duration = Number(_streamAudio.duration);
-      var target = Number(pending.position);
-      if (Number.isFinite(duration) && duration > 0) {
-        target = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
-      }
-      if (Math.abs((Number(_streamAudio.currentTime) || 0) - target) > 0.25) {
-        _streamAudio.currentTime = target;
-      }
-      GLOBAL.currentPosition = target;
-      window._pendingRoomStreamSeek = null;
-    } catch (err) {
-      console.warn('⚠️ streamAudio canplay seek failed:', err);
-    }
-  });
   console.log('✅ streamAudio element created');
-  
-  // Initialize volume slider now that streamAudio exists
-  var volumeSlider = document.getElementById('volumeSlider');
-  if (volumeSlider) {
-    console.log('[STREAM] Initializing volume slider with streamAudio');
-    volumeSlider.value = (_streamAudio.volume ?? 0.8) * 100;
-    volumeSlider.addEventListener('input', () => {
-      console.log('[STREAM] volume changed via slider to', volumeSlider.value);
-      _streamAudio.volume = volumeSlider.value / 100;
-    });
-  }
-  
   return _streamAudio;
 }
 
@@ -102,24 +67,10 @@ function autoConnectStream() {
   var url = '/stream/room/' + roomId + '/stream';
   var audio = _getOrCreateStreamAudio();
 
-  if (_streamConnectInFlight && _streamConnectUrl === url) {
-    // Even if already connected, check if there's a pending seek to apply
-    var pending = window._pendingRoomStreamSeek;
-    if (pending && audio.readyState >= 1) {
-      _applyPendingSeek(audio, pending);
-    }
-    return;
-  }
+  if (_streamConnectInFlight && _streamConnectUrl === url) return;
 
   var absoluteUrl = new URL(url, window.location.href).href;
-  if (audio.src === absoluteUrl && !audio.paused && audio.readyState > 0) {
-    // Stream already loaded and playing - check for pending seek
-    var pending = window._pendingRoomStreamSeek;
-    if (pending) {
-      _applyPendingSeek(audio, pending);
-    }
-    return;
-  }
+  if (audio.src === absoluteUrl && !audio.paused && audio.readyState > 0) return;
 
   if (audio.readyState > 0) {
     audio.pause();
@@ -131,25 +82,6 @@ function autoConnectStream() {
   _streamConnectUrl = url;
   audio.src = url;
   audio.load();
-
-  // FIX: After F5, there may be a pending seek from room_state.position.
-  // Apply it once the stream is loaded.
-  var pending = window._pendingRoomStreamSeek;
-  if (pending) {
-    var pendingTrackId = pending.trackId;
-    if (!pendingTrackId || !GLOBAL.currentTrack || Number(GLOBAL.currentTrack.id) === Number(pendingTrackId)) {
-      var applySeekWhenReady = function () {
-        _applyPendingSeek(audio, window._pendingRoomStreamSeek);
-      };
-      if (audio.readyState >= 2) {
-        applySeekWhenReady();
-      } else {
-        audio.addEventListener('loadedmetadata', applySeekWhenReady, { once: true });
-        audio.addEventListener('canplay', applySeekWhenReady, { once: true });
-      }
-    }
-  }
-
   audio.play().catch(function (err) {
     if (err.name === 'NotAllowedError') {
       window._pendingStreamUrl = url;
@@ -161,25 +93,6 @@ function autoConnectStream() {
   }).finally(function () {
     _streamConnectInFlight = false;
   });
-}
-
-// Helper to apply pending seek to stream audio
-function _applyPendingSeek(audio, pending) {
-  if (!pending || !audio) return;
-  try {
-    var duration = Number(audio.duration);
-    var target = Number(pending.position);
-    if (Number.isFinite(duration) && duration > 0) {
-      target = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
-    }
-    if (Math.abs((Number(audio.currentTime) || 0) - target) > 0.25) {
-      audio.currentTime = target;
-    }
-    GLOBAL.currentPosition = target;
-    window._pendingRoomStreamSeek = null;
-  } catch (err) {
-    console.warn('⚠️ autoConnectStream seek failed:', err);
-  }
 }
 
 // ── Остановить стрим ──────────────────────────────────────────────────────────

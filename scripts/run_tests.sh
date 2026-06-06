@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run ingestion tests using project's venv
+# Run all backend tests using project's venv
 VENV=.venv
 PY="$VENV/bin/python"
 if [ ! -x "$PY" ]; then
@@ -11,8 +11,13 @@ if [ ! -x "$PY" ]; then
   if [ -f backend/requirements-dev.txt ]; then
     $VENV/bin/pip install -r backend/requirements-dev.txt
   else
-    $VENV/bin/pip install pytest
+    $VENV/bin/pip install pytest httpx
   fi
 fi
 
-PYTHONPATH=backend $PY -m pytest backend/tests/test_ingest_state.py -q
+echo "Running all backend tests..."
+PYTHONPATH=backend $PY -m pytest backend/tests/ -v --tb=short
+
+echo ""
+echo "Running tests with coverage..."
+PYTHONPATH=backend $PY -m pytest backend/tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-report=html:coverage_html 2>/dev/null || echo "Coverage report generated (if pytest-cov installed)"

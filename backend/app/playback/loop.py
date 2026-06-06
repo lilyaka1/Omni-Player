@@ -151,8 +151,9 @@ class RoomPlaybackLoopManager:
         Порядок:
         1. acquire advance guard (only one at a time per room)
         2. sleep 0.1s (стабилизация после события)
-        3. проверить что now_playing не изменился за это время
-        4. advance
+        3. advance
+        4. loop продолжает работать — не останавливаем, потому что
+           пользователь может добавить треки позже.
         """
         if not _advance_guard.begin(room_id):
             # Другой advance уже идёт — skip
@@ -162,8 +163,9 @@ class RoomPlaybackLoopManager:
             await asyncio.sleep(0.1)
             new_id = await asyncio.to_thread(advance_playback, room_id)
             if new_id is None:
-                # Очередь закончилась
-                self._stop_loop(room_id)
+                print(f"ℹ️ [loop] Room {room_id}: queue empty after advance, loop stays alive")
+                # Очередь закончилась — но loop продолжает работать.
+                # playback_tick каждые 5 сек проверит, появились ли треки.
         except Exception:
             pass
         finally:
@@ -258,6 +260,7 @@ class RoomPlaybackLoopManager:
         """
         try:
             from app.database.models import Room
+            from app.database.session import SessionLocal
 
             def _fetch():
                 db = SessionLocal()

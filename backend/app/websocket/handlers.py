@@ -393,14 +393,38 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
 
 # -- Playback control --
 
-async def handle_playback_ended(room_id: int, data: dict) -> None:
+async def handle_playback_ended(room_id: int, user, data: dict) -> None:
     """
     Handle client notification that the current track has ended.
     SECURITY: Only admins can trigger this; the server controls the queue.
     The client sends this purely as a signal that the HTML <audio> element ended.
     """
-    # For now, we trust the client's "ended" event to advance the queue.
-    # In production you might want a server-side timer fallback.
+    # Check if user is admin/owner before allowing queue advance
+    def _check_admin():
+        _db = SessionLocal()
+        try:
+            room = _db.query(Room).filter(Room.id == room_id).first()
+            if not room:
+                return False
+            if room.creator_id == user.id:
+                return True
+            stmt = user_room_association.select().where(
+                (user_room_association.c.user_id == user.id) &
+                (user_room_association.c.room_id == room_id)
+            )
+            existing = _db.execute(stmt).first()
+            if existing and existing.role == RoomRoleEnum.ADMIN:
+                return True
+            return False
+        finally:
+            _db.close()
+
+    is_admin = await asyncio.to_thread(_check_admin)
+    if not is_admin:
+        print(f"⛔ [ENDED] Room {room_id}: non-admin user {user.id} attempted to advance queue")
+        return
+
+    # Server-side tick will handle advance automatically — this is just a signal
     try:
         from app.playback.controller import next_track
         result = await asyncio.to_thread(next_track, room_id)
@@ -410,15 +434,42 @@ async def handle_playback_ended(room_id: int, data: dict) -> None:
         return
 
 
-async def handle_playback_control(room_id: int, data: dict) -> None:
+async def handle_playback_control(room_id: int, user, data: dict) -> None:
     """MVP radio-mode playback control — только now_playing_track_id в БД.
     Никаких is_playing / is_live / broadcast state.
+    SECURITY: Only admin can trigger next/play/pause actions.
     """
     from datetime import datetime
 
     action = data.get("action")
     track_id = data.get("track_id")
-    print(f"🎮 [PLAYBACK] MVP radio-mode: room={room_id} action={action}")
+    seek_position = data.get("seek_position")  # Optional: seek to position in seconds
+    print(f"🎮 [PLAYBACK] MVP radio-mode: room={room_id} action={action} user={user.id} seek_position={seek_position}")
+
+    # SECURITY: Only owner/admin can trigger playback control actions
+    def _check_admin():
+        _db = SessionLocal()
+        try:
+            room = _db.query(Room).filter(Room.id == room_id).first()
+            if not room:
+                return False
+            if room.creator_id == user.id:
+                return True
+            stmt = user_room_association.select().where(
+                (user_room_association.c.user_id == user.id) &
+                (user_room_association.c.room_id == room_id)
+            )
+            existing = _db.execute(stmt).first()
+            if existing and existing.role == RoomRoleEnum.ADMIN:
+                return True
+            return False
+        finally:
+            _db.close()
+
+    is_admin = await asyncio.to_thread(_check_admin)
+    if not is_admin:
+        print(f"⛔ [PLAYBACK] Room {room_id}: non-admin user {user.id} blocked from action={action}")
+        return
 
     def _db_play():
         _db = SessionLocal()
@@ -457,6 +508,22 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
 
     if action == "next":
         try:
+            # Save current position before advancing
+            try:
+                from app.playback.timeline import timeline_manager
+                current_position = timeline_manager.get_position(room_id) or 0.0
+                if current_position > 0:
+                    db = SessionLocal()
+                    try:
+                        room = db.query(Room).filter(Room.id == room_id).first()
+                        if room:
+                            room.playback_position = current_position
+                            db.commit()
+                    finally:
+                        db.close()
+            except Exception:
+                pass
+
             from app.playback.controller import advance_playback
             result = await asyncio.to_thread(advance_playback, room_id)
             print(f"➡️ [PLAYBACK] Room {room_id}: advance_track result={result}")
@@ -484,6 +551,25 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
             return
         print(f"✅ [PLAYBACK] MVP: now_playing_track_id={res['now_playing_track_id']}")
 
+        # If there's a seek_position, restore timeline with that position
+        if seek_position is not None:
+            try:
+                from app.playback.timeline import timeline_manager
+                state = timeline_manager.get_current_state(room_id)
+                if state:
+                    timeline_manager.seek(room_id, seek_position)
+                    # Save seeked position to DB
+                    db = SessionLocal()
+                    try:
+                        room = db.query(Room).filter(Room.id == room_id).first()
+                        if room:
+                            room.playback_position = seek_position
+                            db.commit()
+                    finally:
+                        db.close()
+            except Exception as e:
+                print(f"⚠️ [PLAYBACK] seek failed: {e}")
+
         room_state = await asyncio.to_thread(_db_state)
         ct = room_state.get("current_track")
         payload = {
@@ -498,6 +584,15 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
         return
 
     elif action == "pause":
+        # Get current position before pausing
+        current_position = 0.0
+        try:
+            from app.playback.timeline import timeline_manager
+            current_position = timeline_manager.get_position(room_id) or 0.0
+            timeline_manager.pause(room_id)
+        except Exception:
+            pass
+
         def _db_pause():
             _db = SessionLocal()
             try:
@@ -505,16 +600,12 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
                 if not room:
                     return {"ok": False, "reason": "room_not_found"}
                 room.is_playing = False
+                if current_position > 0:
+                    room.playback_position = current_position
                 _db.commit()
                 return {"ok": True}
             finally:
                 _db.close()
-
-        try:
-            from app.playback.timeline import timeline_manager
-            timeline_manager.pause(room_id)
-        except Exception:
-            pass
 
         pause_res = await asyncio.to_thread(_db_pause)
         if not pause_res.get("ok"):
@@ -557,8 +648,33 @@ async def handle_playback_control(room_id: int, data: dict) -> None:
 
 # -- Reorder queue --
 
-async def handle_reorder_queue(room_id: int, data: dict) -> None:
+async def handle_reorder_queue(room_id: int, user, data: dict) -> None:
     """Обработка reorder_queue: обновление порядка треков в комнате."""
+    # ENFORCE: only owner/admin can reorder queue
+    def _check_admin():
+        _db = SessionLocal()
+        try:
+            room = _db.query(Room).filter(Room.id == room_id).first()
+            if not room:
+                return False
+            if room.creator_id == user.id:
+                return True
+            stmt = user_room_association.select().where(
+                (user_room_association.c.user_id == user.id) &
+                (user_room_association.c.room_id == room_id)
+            )
+            existing = _db.execute(stmt).first()
+            if existing and existing.role == RoomRoleEnum.ADMIN:
+                return True
+            return False
+        finally:
+            _db.close()
+
+    is_admin = await asyncio.to_thread(_check_admin)
+    if not is_admin:
+        print(f"⛔ [REORDER] Room {room_id}: non-admin user {user.id} blocked")
+        return
+
     new_order = data.get("order", [])
     if not isinstance(new_order, list) or not new_order:
         return

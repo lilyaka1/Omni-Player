@@ -21,6 +21,7 @@ REQUIRED_COLUMNS: List[Tuple[str, str]] = [
     ("room", "is_playing"),
     ("room", "queue_mode"),
     ("room", "queue_version"),
+    ("room", "playback_position"),
     ("room_track", "queue_state"),
 ]
 

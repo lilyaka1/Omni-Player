@@ -41,23 +41,13 @@ const QueueModule = (function () {
   function setQueue(tracks) {
     _queue = (tracks || []).map(normalizeTrackMeta);
     GLOBAL.queue = _queue;
-    console.log('[QUEUE] setQueue called with', _queue.length, 'tracks', _queue);
     render();
   }
 
   function render() {
     const list = document.getElementById('queueList');
-    console.log('[QUEUE] render() called, queueList element:', list ? 'found' : 'NOT FOUND');
-    if (!list) {
-      console.warn('[QUEUE] render ABORTED - queueList element not in DOM');
-      return;
-    }
+    if (!list) return;
 
-    console.log('[QUEUE] rendering', _queue.length, 'items');
-    
-    // Update data attribute with current queue
-    list.setAttribute('data-queue-items', JSON.stringify(_queue));
-    
     if (!_queue.length) {
       list.innerHTML = `<div class="empty-state">
         <i class="fa-solid fa-music"></i>
@@ -111,8 +101,6 @@ const QueueModule = (function () {
       });
     });
 
-    console.log('[QUEUE] render COMPLETE - list HTML children count:', list.children.length);
-    console.log('[QUEUE] render - queueList content:', list.innerHTML.substring(0, 200));
     document.dispatchEvent(new CustomEvent('queuechange'));
   }
 
@@ -241,24 +229,15 @@ const QueueModule = (function () {
   // ---- Загрузить очередь через REST ----
 
   async function loadQueue() {
-    if (!GLOBAL.roomId) {
-      console.log('[QUEUE] loadQueue skipped - no roomId');
-      return;
-    }
+    if (!GLOBAL.roomId) return;
     try {
-      console.log('[QUEUE] loadQueue starting for roomId:', GLOBAL.roomId);
       const res = await fetch(`/rooms/${GLOBAL.roomId}/tracks`);
       if (res.ok) {
         const tracks = await res.json();
-        console.log('[QUEUE] loadQueue got', tracks.length, 'tracks from API');
         trace('queue_loaded', { roomId: GLOBAL.roomId, count: Array.isArray(tracks) ? tracks.length : 0 });
         setQueue(tracks);
-      } else {
-        console.error('[QUEUE] loadQueue failed with status', res.status);
       }
-    } catch (e) {
-      console.error('[QUEUE] loadQueue error:', e);
-    }
+    } catch {}
   }
 
   // ---- Подключение кнопок формы ----
@@ -292,24 +271,6 @@ const QueueModule = (function () {
   function init() {
     bindUI();
     loadQueue();
-    
-    // Watch for React re-rendering that might clear queue
-    const list = document.getElementById('queueList');
-    if (list && typeof MutationObserver !== 'undefined') {
-      const observer = new MutationObserver(() => {
-        // If queueList was cleared by React, restore our queue
-        if (_queue.length > 0 && list.children.length === 1 && list.querySelector('.empty-state')) {
-          console.log('[QUEUE] Detected React overwrote queue, restoring');
-          render();
-        }
-      });
-      
-      observer.observe(list, { 
-        childList: true, 
-        subtree: true,
-        innerHTML: true 
-      });
-    }
   }
 
   if (document.readyState === 'loading') {

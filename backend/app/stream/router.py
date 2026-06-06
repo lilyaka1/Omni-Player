@@ -1,23 +1,66 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
 from app.database.models import Room, RoomTrack
 from app.database.session import get_db
 from pathlib import Path
+import os
 
 router = APIRouter(prefix="/stream", tags=["stream"])
 
 # project root — stream router читает файлы строго относительно него
 BASE_DIR = Path(__file__).resolve().parents[3]
 
+def _send_file_range(file_path: Path, range_header: str):
+    """Handle Range requests for seek support."""
+    file_size = file_path.stat().st_size
+    
+    try:
+        range_str = range_header.strip().split("=")[1]
+        start_str, end_str = range_str.split("-")
+        start = int(start_str) if start_str else 0
+        end = int(end_str) if end_str else file_size - 1
+    except (ValueError, IndexError):
+        raise HTTPException(status_code=416, detail="Range Not Satisfiable")
+    
+    if start >= file_size or end >= file_size or start > end:
+        raise HTTPException(status_code=416, detail="Range Not Satisfiable")
+    
+    length = end - start + 1
+    
+    def iterfile():
+        with open(file_path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            chunk_size = 1024 * 1024  # 1MB chunks
+            while remaining > 0:
+                to_read = min(chunk_size, remaining)
+                data = f.read(to_read)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+    
+    return StreamingResponse(
+        iterfile(),
+        status_code=206,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "no-cache",
+        },
+    )
 
 @router.get("/room/{room_id}/stream")
-async def stream_endpoint(room_id: int, db: Session = Depends(get_db)):
+async def stream_endpoint(room_id: int, request: Request, range: str = Header(None), db: Session = Depends(get_db)):
     """
-    On-demand audio source for a room.
+    On-demand audio source for a room with Range request support.
     INPUT: room.now_playing_track_id
-    OUTPUT: FileResponse (local mp3) | 404
+    OUTPUT: StreamingResponse (206 Partial) | FileResponse (200 Full) | 404
 
+    Supports HTTP Range requests for seek functionality.
     Resolution order:
       1. TrackAsset.local_path (status='ready') — canonical "downloaded" record
       2. RoomTrack.stream_url if it points to an existing local file
@@ -88,12 +131,22 @@ async def stream_endpoint(room_id: int, db: Session = Depends(get_db)):
     if not file_path:
         raise HTTPException(status_code=404, detail="Asset not ready")
 
+    # Handle Range requests for seek support
+    if range:
+        return _send_file_range(file_path, range)
+
+    # Full file response
+    file_size = file_path.stat().st_size
     return FileResponse(
         str(file_path),
         media_type="audio/mpeg",
-        headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
     )
-
 
 @router.get("/room/{room_id}/status")
 async def room_status(room_id: int, db: Session = Depends(get_db)):
@@ -122,7 +175,6 @@ async def room_status(room_id: int, db: Session = Depends(get_db)):
         },
         "room_id": room_id,
     })
-
 
 @router.get("/queue/{room_id}")
 async def room_queue(room_id: int, db: Session = Depends(get_db)):
@@ -155,7 +207,6 @@ async def room_queue(room_id: int, db: Session = Depends(get_db)):
     # Return format that frontend expects: { tracks: [...] }
     return JSONResponse({"tracks": track_list})
 
-
 @router.post("/room/{room_id}/start")
 async def room_start(room_id: int, db: Session = Depends(get_db)):
     """Start playback - stub for frontend compatibility."""
@@ -177,7 +228,6 @@ async def room_start(room_id: int, db: Session = Depends(get_db)):
 
     return JSONResponse({"ok": True, "room_id": room_id, "now_playing": started})
 
-
 @router.post("/room/{room_id}/stop")
 async def room_stop(room_id: int, db: Session = Depends(get_db)):
     """Stop playback - stub for frontend compatibility."""
@@ -193,6 +243,79 @@ async def room_stop(room_id: int, db: Session = Depends(get_db)):
         print(f"❌ room_stop error: {e}")
 
     return JSONResponse({"ok": True, "room_id": room_id})
+
+@router.get("/{room_id}")
+async def stream_shortcut(room_id: int, db: Session = Depends(get_db)):
+    """
+    Shortcut endpoint for legacy frontend: /stream/{room_id}
+    Redirects to /stream/room/{room_id}/stream
+    """
+    from app.database.models import Track, TrackAsset
+    from sqlalchemy import func
+    from app.room.manager import room_manager
+    from app.room.providers.soundcloud import soundcloud_client
+    from app.database.session import SessionLocal
+
+    room = db.query(Room).filter(Room.id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    if room.now_playing_track_id is None:
+        raise HTTPException(status_code=404, detail="No track playing")
+
+    track = db.query(RoomTrack).filter(RoomTrack.id == room.now_playing_track_id).first()
+    if not track:
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    file_path = None
+
+    # 1. Prefer TrackAsset.local_path
+    track_model = db.query(Track).filter(
+        func.lower(Track.source) == func.lower(track.source),
+        Track.source_track_id == track.source_track_id,
+    ).first()
+    if track_model:
+        asset = (
+            db.query(TrackAsset)
+            .filter(TrackAsset.track_id == track_model.id, TrackAsset.status == 'ready')
+            .order_by(TrackAsset.updated_at.desc())
+            .first()
+        )
+        if asset and asset.local_path:
+            fp = Path(asset.local_path)
+            if fp.is_file():
+                file_path = fp
+
+    # 2. Fallback: RoomTrack.stream_url pointing to an existing local file
+    if not file_path and track.stream_url and not (
+        track.stream_url.startswith('http://') or track.stream_url.startswith('https://')
+    ):
+        fp = Path(track.stream_url)
+        if fp.is_file():
+            file_path = fp
+
+    # 3. Fallback: download on demand
+    if not file_path:
+        local_path = await room_manager.prefetch_track_file(
+            track.id,
+            track.source,
+            track.source_track_id,
+            SessionLocal,
+            soundcloud_client,
+        )
+        if local_path:
+            fp = Path(local_path)
+            if fp.is_file():
+                file_path = fp
+
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Asset not ready")
+
+    return FileResponse(
+        str(file_path),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+    )
 
 
 @router.get("/search/soundcloud")

@@ -106,7 +106,7 @@ _ALLOWED_TRANSITIONS = {
 }
 
 
-def update_playback_session(room_id: int, new_state: str, current_queue_item_id: Optional[int] = None, expected_end_at=None, force: bool = False) -> Optional[PlaybackSession]:
+def update_playback_session(room_id: int, new_state: str, current_queue_item_id: Optional[int] = None, expected_end_at=None, force: bool = False, playback_position: Optional[float] = None) -> Optional[PlaybackSession]:
     """
     Atomically update/create PlaybackSession for a room with generation increment.
     Enforces allowed transitions and increments generation for each change.
@@ -160,6 +160,10 @@ def update_playback_session(room_id: int, new_state: str, current_queue_item_id:
                 db.rollback()
                 return None
 
+            # Also update Room.playback_position if provided
+            if playback_position is not None:
+                db.query(Room).filter(Room.id == room_id).update({Room.playback_position: playback_position})
+
             db.commit()
             sess = db.query(PlaybackSession).filter(PlaybackSession.room_id == room_id).first()
             return sess
@@ -201,11 +205,14 @@ def _select_ready_roomtrack(db, room_id: int, after_order=None, after_id=None, l
     never be selected because it was never downloaded, and is never downloaded
     because it was never selected).
 
-    - normal mode: next item with queue_state in (ready, waiting_download),
+    - normal mode: next item with queue_state in (ready, waiting_download, processing),
       ordered by order then id; restricted to items after the current one when
       after_order/after_id is given. Returns None when the queue is exhausted.
     - loop mode: round-robin by order ignoring queue_state — next by order after
       the current item, wrapping to the first track of the room.
+    
+    NOTE: 'processing' state is included so tracks being downloaded are visible
+    and don't disappear from the queue UI.
     """
     if loop_mode:
         nxt = None
@@ -234,7 +241,7 @@ def _select_ready_roomtrack(db, room_id: int, after_order=None, after_id=None, l
 
     q = db.query(RoomTrack).filter(
         RoomTrack.room_id == room_id,
-        RoomTrack.queue_state.in_(['ready', 'waiting_download']),
+        RoomTrack.queue_state.in_(['ready', 'waiting_download', 'processing']),
     )
     if after_order is not None:
         q = q.filter(RoomTrack.order > after_order)
@@ -448,6 +455,7 @@ def next_track(room_id: int) -> Optional[int]:
                 room.now_playing_track_id = next_row.id
                 room.is_playing = True
                 room.playback_started_at = datetime.utcnow()
+                db.commit()
                 try:
                     update_queue_state(next_row.id, 'playing')
                 except Exception:
@@ -467,10 +475,38 @@ def next_track(room_id: int) -> Optional[int]:
                 on_playback_event(room_id, "next", {"track_id": next_row.id})
                 return next_row.id
             else:
-                room.now_playing_track_id = None
+                # НЕ сбрасываем now_playing_track_id в NULL — стрим должен продолжаться.
+                # При loop_mode: wrap around к первому треку.
+                if loop_mode:
+                    first = _select_ready_roomtrack(db, room_id, loop_mode=True)
+                    if first:
+                        try:
+                            if current:
+                                update_queue_state(current.id, 'played')
+                        except Exception:
+                            pass
+                        room.now_playing_track_id = first.id
+                        room.is_playing = True
+                        room.playback_started_at = datetime.utcnow()
+                        try:
+                            update_queue_state(first.id, 'playing')
+                        except Exception:
+                            pass
+                        expected_end = None
+                        try:
+                            expected_end = datetime.utcnow() + timedelta(seconds=int(first.duration or 0))
+                        except Exception:
+                            expected_end = None
+                        try:
+                            update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end)
+                        except Exception:
+                            pass
+                        on_playback_event(room_id, "next", {"track_id": first.id})
+                        return first.id
+                # При обычном режиме: оставляем текущий трек, стрим не прерывается
                 db.commit()
                 on_playback_event(room_id, "ended", {})
-                return None
+                return room.now_playing_track_id
 
         finally:
             db.close()
@@ -902,13 +938,51 @@ def _inner_advance(db, room, room_id: int, sess: PlaybackSession) -> None:
         db.commit()
 
         on_playback_event(room_id, "next", {"track_id": first.id})
+    elif loop_mode:
+        # Queue exhausted in loop mode — reset all terminal items and retry
+        terminal_states = ('played', 'skipped', 'failed')
+        db.query(RoomTrack).filter(
+            RoomTrack.room_id == room_id,
+            RoomTrack.queue_state.in_(terminal_states),
+        ).update({RoomTrack.queue_state: 'ready'}, synchronize_session=False)
+        db.flush()
+
+        # Retry selection after reset
+        first = _select_ready_roomtrack(
+            db, room_id,
+            after_order=None,
+            after_id=None,
+            loop_mode=True,
+        )
+        if first:
+            room.now_playing_track_id = first.id
+            room.is_playing = True
+            room.playback_started_at = datetime.utcnow()
+            first.queue_state = 'playing'
+
+            expected_end = None
+            try:
+                expected_end = datetime.utcnow() + timedelta(seconds=int(first.duration or 0))
+            except Exception:
+                pass
+
+            sess.current_queue_item_id = first.id
+            sess.playback_state = 'playing'
+            sess.expected_end_at = expected_end
+            sess.generation = (sess.generation or 0) + 1
+            sess.updated_at = datetime.utcnow()
+            db.commit()
+
+            on_playback_event(room_id, "next", {"track_id": first.id})
+            return
+
+        # Still nothing after reset — не сбрасываем now_playing
+        # Стрим должен продолжаться, играть текущий трек
+        db.commit()
+        on_playback_event(room_id, "ended", {})
     else:
-        # Queue exhausted
-        room.now_playing_track_id = None
-        room.is_playing = False
-        sess.playback_state = 'stopped'
-        sess.generation = (sess.generation or 0) + 1
-        sess.updated_at = datetime.utcnow()
+        # Queue exhausted (normal mode) — не сбрасываем now_playing
+        # Стрим должен продолжаться, играть текущий трек
         db.commit()
         on_playback_event(room_id, "ended", {})
 

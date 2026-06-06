@@ -21,17 +21,6 @@ def get_room_state(db, room) -> dict:
     if room.now_playing_track_id:
         current = db.query(RoomTrack).filter(RoomTrack.id == room.now_playing_track_id).first()
 
-    if not current:
-        return {
-            "current_track_id": None,
-            "current_track": None,
-            "position": 0,
-            "server_time": datetime.utcnow().isoformat(),
-            "queue": [],
-            "is_playing": False,
-            "playback_session": None,
-        }
-
     track = current
 
     # Position calculation

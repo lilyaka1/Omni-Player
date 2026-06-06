@@ -1,4 +1,3 @@
-
 # macOS
 .DS_Store
 # Thumbnails
@@ -120,3 +119,14 @@ downloads/
 
 
 *onnx
+backend/tts_audio
+backend/tts_audio
+backend/tts_models
+
+omni_local.db
+omni_player.db
+backend/omni_local.db
+backend/omni_player.db
+
+tts_audio
+tts_models

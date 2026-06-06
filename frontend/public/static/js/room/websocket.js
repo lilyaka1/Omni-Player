@@ -14,77 +14,6 @@ const WSModule = (function () {
   let _pendingMessages = [];
   let _lastMessageAt = 0;
   let _watchdogTimer = null;
-  const _staleTimeoutMs = 60000;
-
-  function syncRoomStreamFromPayload(payload) {
-    if (!payload) return;
-
-    const trackId = Number(payload.track_id || (GLOBAL.currentTrack && GLOBAL.currentTrack.id) || 0);
-    const position = Number(payload.position);
-    if (!Number.isFinite(position) || position < 0) return;
-
-    const streamAudio = document.getElementById('streamAudio');
-    if (!streamAudio) {
-      window._pendingRoomStreamSeek = { trackId, position };
-      return;
-    }
-
-    // RELAXED track check after F5: only skip if GLOBAL has a DIFFERENT track
-    if (trackId && GLOBAL.currentTrack && Number(GLOBAL.currentTrack.id) !== trackId) {
-      window._pendingRoomStreamSeek = { trackId, position };
-      return;
-    }
-
-    const applySeek = () => {
-      try {
-        const duration = Number(streamAudio.duration);
-        let target = position;
-        if (Number.isFinite(duration) && duration > 0) {
-          target = Math.max(0, Math.min(position, Math.max(0, duration - 0.25)));
-        }
-        if (Math.abs((Number(streamAudio.currentTime) || 0) - target) > 0.35) {
-          streamAudio.currentTime = target;
-        }
-        GLOBAL.currentPosition = target;
-        window._pendingRoomStreamSeek = null;
-      } catch (e) {
-        window._pendingRoomStreamSeek = { trackId, position };
-      }
-    };
-
-    if (streamAudio.readyState >= 2) {
-      applySeek();
-      return;
-    }
-
-    // Stream not ready yet — store pending seek
-    window._pendingRoomStreamSeek = { trackId, position };
-    if (streamAudio.__roomTrackSyncBound) return;
-    streamAudio.__roomTrackSyncBound = true;
-
-    const flushPendingSeek = () => {
-      const pending = window._pendingRoomStreamSeek;
-      if (!pending) return;
-      try {
-        const duration = Number(streamAudio.duration);
-        let target = Number(pending.position);
-        if (Number.isFinite(duration) && duration > 0) {
-          target = Math.max(0, Math.min(target, Math.max(0, duration - 0.25)));
-        }
-        if (Math.abs((Number(streamAudio.currentTime) || 0) - target) > 0.35) {
-          streamAudio.currentTime = target;
-        }
-        GLOBAL.currentPosition = target;
-        window._pendingRoomStreamSeek = null;
-      } catch (e) {
-        // Stream not ready yet, retry later
-      }
-    };
-
-    streamAudio.addEventListener('loadedmetadata', flushPendingSeek);
-    streamAudio.addEventListener('canplay', flushPendingSeek);
-    streamAudio.addEventListener('timeupdate', flushPendingSeek, { once: true });
-  }
 
   // ── connect ────────────────────────────────────────────────────────────────
   function connect() {
@@ -120,10 +49,7 @@ const WSModule = (function () {
       flushPendingMessages();
       startWatchdog();
       ws._pingInterval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'ping' }));
-          _lastMessageAt = Date.now();
-        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
       }, 25000);
     };
 
@@ -169,7 +95,7 @@ const WSModule = (function () {
       }
       if (ws.readyState !== WebSocket.OPEN) return;
       const silentForMs = Date.now() - (_lastMessageAt || 0);
-      if (silentForMs > _staleTimeoutMs) {
+      if (silentForMs > 20000) {
         console.warn('[WS] Watchdog: socket stale, reconnecting...');
         ws.__intentionalClose = true;
         try { ws.close(1000, 'watchdog-stale'); } catch {}
@@ -270,10 +196,6 @@ const WSModule = (function () {
         handleTrackChanged(msg);
         break;
 
-      case 'track_sync':
-        handleTrackSync(msg);
-        break;
-
       case 'queue_updated':
         if (typeof QueueModule !== 'undefined') {
           if (Array.isArray(msg.data)) {
@@ -307,6 +229,7 @@ const WSModule = (function () {
 
       case 'playback_started':
         GLOBAL.isPlaying = true;
+        // Обновляем UI если есть PlayerModule
         if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
           PlayerModule.applyState({ is_playing: true, current_track: GLOBAL.currentTrack });
         }
@@ -326,17 +249,8 @@ const WSModule = (function () {
     if (!data) return;
     const track = data.current_track || data.track || null;
     const isPlaying = data.is_playing;
+    console.log('[WS] handleRoomState track:', track?.title, 'thumb:', track?.thumb_url || track?.thumbnail, 'isPlaying:', isPlaying);
     setGlobalFromTrack(track, isPlaying);
-
-    // FIX: Sync audio position from room_state.position so after F5 the audio
-    // resumes from the correct point instead of starting from 0.
-    if (typeof data.position === 'number' && data.position > 0) {
-      syncRoomStreamFromPayload({
-        track_id: track ? track.id : (GLOBAL.currentTrack ? GLOBAL.currentTrack.id : 0),
-        position: data.position,
-      });
-    }
-
     if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
       PlayerModule.applyState(data);
     }
@@ -369,41 +283,21 @@ const WSModule = (function () {
       current_track: track,
       track: track,
     };
-    // Для track_changed события, если трек есть - значит он играет
-    const isPlaying = Boolean(track);
+    // Для track_changed события: если трек есть — значит он играет.
+    // Если трек не пришёл (ended) — не меняем isPlaying (стрим продолжается).
+    const isPlaying = track ? true : null;
     setGlobalFromTrack(track, isPlaying);
     if (typeof PlayerModule !== 'undefined' && typeof PlayerModule.applyState === 'function') {
       PlayerModule.applyState(normalized);
     }
   }
 
-  function handleTrackSync(msg) {
-    const payload = msg.payload || msg.data || msg || {};
-    if (!payload) return;
-    syncRoomStreamFromPayload(payload);
-
-    const streamAudio = document.getElementById('streamAudio');
-    if (!streamAudio) return;
-
-    if (payload.is_playing === false) {
-      streamAudio.pause();
-      GLOBAL.isPlaying = false;
-      return;
-    }
-
-    if (payload.is_playing === true && streamAudio.src && streamAudio.paused) {
-      streamAudio.play().catch(function (err) {
-        if (err && err.name === 'NotAllowedError') {
-          window._pendingStreamUrl = streamAudio.src;
-          if (typeof window.showPlayPrompt === 'function') window.showPlayPrompt();
-        }
-      });
-      GLOBAL.isPlaying = true;
-    }
-  }
-
   // ── Helpers ──────────────────────────────────────────────────────────────
   function setGlobalFromTrack(track, isPlaying = null) {
+    // Нормализуем thumb_url → thumbnail, если сервер прислал thumb_url
+    if (track && track.thumb_url && !track.thumbnail) {
+      track.thumbnail = track.thumb_url;
+    }
     GLOBAL.currentTrack = track;
     // Используем явно переданное состояние, если есть, иначе определяем по наличию трека
     if (isPlaying !== null) {

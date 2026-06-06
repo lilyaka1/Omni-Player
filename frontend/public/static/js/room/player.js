@@ -25,6 +25,7 @@ const PlayerModule = (function () {
 
   let _seekDragging = false;
   let _progressTimer = null;
+  let _initialized = false;
 
   // ── Утилиты ───────────────────────────────────────────────────────────────
   function isRoomMode() {
@@ -110,6 +111,7 @@ const PlayerModule = (function () {
 
   // ── init ──────────────────────────────────────────────────────────────────
   function init() {
+    if (_initialized) return;
     audio            = document.getElementById('audioPlayer');
     btnPlay          = document.getElementById('btnPlayPause');
     playIcon         = document.getElementById('playIcon');
@@ -127,6 +129,18 @@ const PlayerModule = (function () {
     artworkContainer = document.getElementById('artworkContainer');
     volumeSlider     = document.getElementById('volumeSlider');
 
+    console.log('[Player] init() DOM refs:', {
+      trackTitle: !!trackTitle, trackArtist: !!trackArtist, artworkBox: !!artworkBox,
+      audio: !!audio, btnPlay: !!btnPlay
+    });
+
+    // Если DOM ещё не готов — попробуем позже
+    if (!trackTitle || !trackArtist || !artworkBox) {
+      console.warn('[Player] DOM not ready, retrying init in 100ms');
+      setTimeout(init, 100);
+      return;
+    }
+
     btnPlay?.addEventListener('click', togglePlay);
     btnNext?.addEventListener('click', nextTrack);
     btnPrev?.addEventListener('click', prevTrack);
@@ -140,8 +154,12 @@ const PlayerModule = (function () {
       seekTo(ratio * GLOBAL.currentDuration);
     });
 
-    // Volume slider is initialized in stream.js after streamAudio is created
-    // (see stream.js _getOrCreateStreamAudio() function)
+    if (volumeSlider) {
+      volumeSlider.value = (audio?.volume ?? 0.8) * 100;
+      volumeSlider.addEventListener('input', () => {
+        if (audio) audio.volume = volumeSlider.value / 100;
+      });
+    }
 
     // Progress update для non-room mode
     audio?.addEventListener('timeupdate', () => {
@@ -165,6 +183,19 @@ const PlayerModule = (function () {
 
     ensureProgressTicker();
     syncControlsByRole();
+
+    _initialized = true;
+    console.log('[Player] init() complete, _initialized = true');
+
+    // Применить текущий трек, если WS уже прислал данные до загрузки player.js
+    if (GLOBAL.currentTrack) {
+      console.log('[Player] re-applying existing track from GLOBAL:', GLOBAL.currentTrack.title);
+      applyState({
+        current_track: GLOBAL.currentTrack,
+        is_playing: GLOBAL.isPlaying,
+        position: GLOBAL.currentPosition,
+      });
+    }
   }
 
   // ── Подключение streamAudio ─────────────────────────────────────────────
@@ -192,6 +223,19 @@ const PlayerModule = (function () {
 
     if (track) {
       applyTrack(track, data);
+    } else if (GLOBAL.currentTrack) {
+      // Сервер прислал data без трека (например, position update или is_playing),
+      // но у нас уже есть currentTrack — не трогаем UI.
+      // Обновляем только позицию / play state.
+      if (data.position !== undefined) {
+        GLOBAL.currentPosition = Number(data.position);
+        updateProgress(GLOBAL.currentPosition, GLOBAL.currentDuration);
+      }
+      if (data.is_playing !== undefined) {
+        GLOBAL.isPlaying = Boolean(data.is_playing);
+        setPlayIcon(GLOBAL.isPlaying);
+        artworkContainer?.classList.toggle('spinning', GLOBAL.isPlaying);
+      }
     } else {
       applyNoTrack();
     }
@@ -209,7 +253,7 @@ const PlayerModule = (function () {
     // UI: title, artist, artwork
     if (trackTitle) trackTitle.textContent = track.title || 'Без названия';
     if (trackArtist) trackArtist.textContent = track.artist || track.uploader || '—';
-    renderArtwork(track.thumbnail || null);
+    renderArtwork(track.thumbnail || track.thumb_url || null);
     document.title = `${track.title || '…'} — Omni Player`;
 
     document.dispatchEvent(new CustomEvent('trackchange'));
@@ -217,16 +261,25 @@ const PlayerModule = (function () {
     // Room mode: играем единый room stream
     if (isRoomMode()) {
       var streamAudio = document.getElementById('streamAudio');
+      if (streamAudio && !streamAudio.__playerListenersBound) {
+        attachStreamAudioListeners();
+        streamAudio.__playerListenersBound = true;
+      }
       var url = getRoomStreamUrl();
-        var absUrl = new URL(url, window.location.href).href;
+      var absUrl = new URL(url, window.location.href).href;
       var serverPosition = Number(data?.position);
       if (streamAudio) {
-          if (streamAudio.src !== absUrl || trackChanged) {
+        // При смене трека перезагружаем поток, даже если URL тот же
+        // (сервер переключил трек внутри /stream/room/{id}/stream).
+        // Добавляем ?t= чтобы браузер открыл новое соединение.
+        var forceReload = trackChanged;
+        if (forceReload || streamAudio.src !== absUrl) {
           streamAudio.pause();
-            streamAudio.src = absUrl;
-          streamAudio.load();
+          streamAudio.src = absUrl + '?t=' + Date.now();
+          // НЕ вызываем load() — src сменился, автоматически начнётся загрузка
         }
-        if (Number.isFinite(serverPosition) && serverPosition >= 0) {
+        // При смене трека синхронизируем позицию с сервера
+        if (trackChanged && Number.isFinite(serverPosition) && serverPosition >= 0) {
           syncRoomStreamPosition(streamAudio, serverPosition, incomingId);
         }
         if (shouldPlay) {

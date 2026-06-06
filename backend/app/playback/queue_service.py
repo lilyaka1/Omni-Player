@@ -198,9 +198,12 @@ class QueueService:
                         )
 
                 # max order
-                max_order = db.execute(
-                    func.max(RoomTrack.order)
-                ).filter(RoomTrack.room_id == room_id).scalar() or 0
+                max_order = (
+                    db.query(func.max(RoomTrack.order))
+                    .filter(RoomTrack.room_id == room_id)
+                    .scalar()
+                    or 0
+                )
 
                 track = RoomTrack(
                     room_id=room_id,

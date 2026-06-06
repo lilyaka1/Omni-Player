@@ -1,7 +1,12 @@
 import asyncio
+import sys
+import types
 
 
 def test_search_soundcloud_maps_results(monkeypatch):
+    yt_dlp_stub = types.SimpleNamespace(YoutubeDL=object)
+    monkeypatch.setitem(sys.modules, "yt_dlp", yt_dlp_stub)
+
     from app.domains.tracks import service
 
     async def fake_search_tracks(query: str, limit: int = 10):

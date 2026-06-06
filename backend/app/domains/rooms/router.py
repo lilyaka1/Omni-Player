@@ -1,6 +1,8 @@
 from typing import List
 from pathlib import Path
 from uuid import uuid4
+import asyncio
+import json as json_lib
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Body
 from sqlalchemy.orm import Session
@@ -15,6 +17,35 @@ from app.domains.auth.service import decode_token
 from fastapi import Request
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
+
+
+async def _broadcast_queue_update(room_id: int, db: Session):
+    """Broadcast updated queue state to all WebSocket clients in the room."""
+    try:
+        room = db.query(Room).filter(Room.id == room_id).first()
+        if not room:
+            return
+        queue_data = get_room_state(db, room)
+        queue = queue_data.get("queue", [])
+        
+        from app.websocket.manager import manager as ws_manager
+        if ws_manager and room_id in ws_manager.active_connections:
+            payload = {
+                "type": "queue_update",
+                "data": {
+                    "queue": queue,
+                    "queue_version": getattr(room, 'queue_version', 0),
+                    "current_track_id": queue_data.get("current_track_id"),
+                    "current_track": queue_data.get("current_track"),
+                    "playback_session": queue_data.get("playback_session"),
+                },
+                "event_id": str(uuid4()),
+            }
+            msg = json_lib.dumps(payload)
+            await ws_manager.broadcast(room_id, msg)
+            print(f"📡 [router] broadcast_queue_update for room {room_id}, queue_size={len(queue)}")
+    except Exception as e:
+        print(f"⚠️ [router] _broadcast_queue_update failed: {e}")
 
 
 def _get_download_status(stream_url: str) -> str:
@@ -351,6 +382,12 @@ async def add_room_track(
             # best-effort: do not block the API
             pass
 
+    # Broadcast queue update to all WS clients
+    try:
+        asyncio.create_task(_broadcast_queue_update(room_id, db))
+    except Exception as e:
+        print(f"⚠️ [router] broadcast_queue_update after add failed: {e}")
+
     return {
         "id": track.id,
         "title": track.title,
@@ -392,6 +429,12 @@ def delete_room_track(
     db.delete(track)
     db.commit()
 
+    # Broadcast queue update to all WS clients
+    try:
+        asyncio.create_task(_broadcast_queue_update(room_id, db))
+    except Exception as e:
+        print(f"⚠️ [router] broadcast_queue_update after delete failed: {e}")
+
 
 @router.delete("/{room_id}/tracks", status_code=status.HTTP_204_NO_CONTENT)
 def clear_room_tracks(
@@ -411,12 +454,19 @@ def clear_room_tracks(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
     db.query(RoomTrack).filter(RoomTrack.room_id == room_id).delete(synchronize_session=False)
+    db.commit()
     try:
         from app.playback.controller import stop_playback
         stop_playback(room_id)
     except Exception:
         # controller unavailable — do not mutate playback state here
         print(f"⚠️ [router] controller.stop_playback unavailable for room {room_id}")
+
+    # Broadcast queue update to all WS clients
+    try:
+        asyncio.create_task(_broadcast_queue_update(room_id, db))
+    except Exception as e:
+        print(f"⚠️ [router] broadcast_queue_update after clear failed: {e}")
 
 
 @router.put("/{room_id}/tracks/reorder")
@@ -443,6 +493,13 @@ def reorder_room_tracks(
         if track:
             track.order = idx
     db.commit()
+
+    # Broadcast queue update to all WS clients
+    try:
+        asyncio.create_task(_broadcast_queue_update(room_id, db))
+    except Exception as e:
+        print(f"⚠️ [router] broadcast_queue_update after reorder failed: {e}")
+
     return {"ok": True, "room_id": room_id}
 
 

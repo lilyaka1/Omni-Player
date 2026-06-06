@@ -25,8 +25,24 @@ install-dev: venv
 	fi
 
 test: venv
-	@echo "Running ingestion unit tests"
-	PYTHONPATH=backend $(PY) -m pytest backend/tests/test_ingest_state.py -q
+	@echo "Running all backend tests"
+	PYTHONPATH=backend $(PY) -m pytest backend/tests/ -v --tb=short
+
+test-coverage: venv
+	@echo "Running tests with coverage"
+	PYTHONPATH=backend $(PY) -m pytest backend/tests/ -v --tb=short --cov=app --cov-report=term-missing --cov-report=html:coverage_html
+
+test-auth: venv
+	@echo "Running auth tests"
+	PYTHONPATH=backend $(PY) -m pytest backend/tests/test_auth_service.py backend/tests/test_auth_api.py -v --tb=short
+
+test-api: venv
+	@echo "Running API integration tests"
+	PYTHONPATH=backend $(PY) -m pytest backend/tests/test_*_api.py -v --tb=short
+
+test-unit: venv
+	@echo "Running unit tests"
+	PYTHONPATH=backend $(PY) -m pytest backend/tests/test_*_service.py backend/tests/test_*_controller.py backend/tests/test_*_manager.py -v --tb=short
 
 ingest-once: venv
 	@echo "Run ingest worker once (recover + process pending)"
