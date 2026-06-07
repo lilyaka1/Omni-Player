@@ -141,8 +141,8 @@ class TrackService:
             local_file_path=local_file_path,
             canonical_key=canonical_key,
             media_asset_id=media_asset_id,
-            processing_status=('ready' if local_file_path else 'processing'),
-            processing_progress=(100 if local_file_path else 0),
+            processing_status=('ready' if local_file_path else ('ready' if info.get('url') else 'processing')),
+            processing_progress=(100 if local_file_path else (100 if info.get('url') else 0)),
         )
         self.db.add(track)
         self.db.commit()

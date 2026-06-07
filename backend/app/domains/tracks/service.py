@@ -50,13 +50,14 @@ async def search_youtube(query: str, limit: int = 10) -> List[Dict]:
                         f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
                         if video_id else ""
                     )
+                    page_url = entry.get("url", "") or f"https://www.youtube.com/watch?v={video_id}"
                     tracks.append({
                         "id": video_id,
                         "title": entry.get("title", "Unknown"),
                         "artist": entry.get("uploader", "Unknown Channel"),
                         "duration": entry.get("duration", 0),
                         "source_track_id": video_id,
-                        "page_url": entry.get("url", ""),
+                        "page_url": page_url,
                         "source": "youtube",
                         "thumbnail": thumbnail,
                         "description": entry.get("description", ""),

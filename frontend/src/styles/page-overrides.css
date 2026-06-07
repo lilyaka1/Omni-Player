@@ -1001,3 +1001,44 @@
     flex-direction: column;
   }
 }
+
+/* ===== LIBRARY TABS ===== */
+.library-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.library-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  border-radius: 99px;
+  border: 1px solid var(--glass-border);
+  background: var(--btn-bg);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all var(--transition);
+  font-weight: 500;
+}
+
+.library-tab.active,
+.library-tab:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.library-tab .badge {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+}
+
+/* ===== BTN SMALL ===== */
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
