@@ -176,6 +176,7 @@ class TrackService:
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
+                'format': 'bestaudio/best',
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
