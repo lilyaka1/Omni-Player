@@ -38,9 +38,11 @@ export default function TrackItem({
 
       <div className="track-info">
         <div className="track-title">{track.title}</div>
-        {track.artist && <div className="track-artist">{track.artist}</div>}
 
         <div className="track-meta">
+          {track.artist && (
+            <span className="track-meta-artist" title={track.artist}>{track.artist}</span>
+          )}
           {track.duration && (
             <span className="track-duration">{formatDuration(track.duration)}</span>
           )}
@@ -48,15 +50,13 @@ export default function TrackItem({
             <span className={`source-badge ${track.source}`}>{track.source}</span>
           )}
           {track.source === 'soundcloud' && track.availability && track.availability !== 'FULL' && (
-            <span className={`badge glass-flat availability-${String(track.availability).toLowerCase()}`} style={{ marginLeft: 8 }} title={
+            <span className={`badge glass-flat availability-${String(track.availability).toLowerCase()}`} title={
               track.availability === 'PREVIEW_ONLY' ? 'SoundCloud preview only' : (track.availability === 'RESTRICTED' ? 'Requires SoundCloud Go+' : 'Track unavailable')
             }>
               {track.availability === 'PREVIEW_ONLY' ? 'Preview only' : (track.availability === 'RESTRICTED' ? 'Restricted' : 'Unknown')}
             </span>
           )}
-          <div style={{ marginLeft: 8 }}>
-            <TrackStatus trackId={track.id} initialStatus={track.processing_status} initialProgress={track.processing_progress} />
-          </div>
+          <TrackStatus trackId={track.id} initialStatus={track.processing_status} initialProgress={track.processing_progress} />
         </div>
       </div>
 

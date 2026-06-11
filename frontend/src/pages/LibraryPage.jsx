@@ -9,6 +9,7 @@ import { showToast } from '../utils/toast';
 // Импорт компонентов
 import PlayerControls from '../components/PlayerControls';
 import EditTrackModal from '../components/EditTrackModal';
+import Sidebar from '../components/Sidebar';
 
 // Импорт хуков
 import useLibraryData from '../hooks/useLibraryData';
@@ -36,6 +37,8 @@ import useSearch from '../hooks/useSearch';
     localFilePath: t.local_file_path || null,
     playable,
     status: t.status || 'ready',
+    processing_status: t.processing_status || t.status || 'ready',
+    processing_progress: t.processing_progress || null,
     playUrl: playable ? `/api/player/audio/${t.id}?token=${encodeURIComponent(token || '')}` : null,
   };
 }
@@ -590,23 +593,7 @@ export default function LibraryPage() {
     <>
       <div id="toast-container" />
       <div className="library-layout">
-        <aside className="sidebar glass glass-secondary">
-          <div className="sidebar-logo">
-            <div className="logo-icon"><i className="fa-solid fa-circle-play" /></div>
-            <span>Omni Player</span>
-          </div>
-          <nav>
-            <button className="nav-item" onClick={() => (window.location.href = '/')}>
-              <i className="fa-solid fa-door-open" /> Комнаты
-            </button>
-            <button className="nav-item active">
-              <i className="fa-solid fa-music" /> Медиотека
-            </button>
-            <button className="nav-item" id="themeToggle">
-              <i className="fa-solid fa-moon" id="themeIcon" /> Тема
-            </button>
-          </nav>
-        </aside>
+        <Sidebar activePage="player" />
 
         <main className="library-main">
           <div className="page-header-wrap">
@@ -724,6 +711,9 @@ export default function LibraryPage() {
                     <div className="track-item-body">
                       <div className="track-item-title">{track.title || 'Без названия'}</div>
                       <div className="track-item-meta">
+                        {track.artist && (
+                          <span className="track-item-artist" title={track.artist}>{track.artist}</span>
+                        )}
                         {track.duration ? formatTime(track.duration) : '—'}
                         <span className={`source-badge glass-flat ${track.source === 'youtube' ? 'source-yt' : (track.source === 'local' ? 'source-local' : 'source-sc')}`} style={{ marginLeft: 4 }}>
                           {track.source === 'youtube' ? 'YT' : (track.source === 'local' ? 'FILE' : 'SC')}
@@ -774,6 +764,9 @@ export default function LibraryPage() {
                     <div className="track-item-body">
                       <div className="track-item-title">{track.title || 'Без названия'}</div>
                       <div className="track-item-meta">
+                        {track.artist && (
+                          <span className="track-item-artist" title={track.artist}>{track.artist}</span>
+                        )}
                         {track.duration ? formatTime(track.duration) : '—'}
                         <span className={`source-badge glass-flat ${track.source === 'youtube' ? 'source-yt' : (track.source === 'local' ? 'source-local' : 'source-sc')}`} style={{ marginLeft: 4 }}>
                           {track.source === 'youtube' ? 'YT' : (track.source === 'local' ? 'FILE' : 'SC')}

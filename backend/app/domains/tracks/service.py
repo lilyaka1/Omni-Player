@@ -78,7 +78,7 @@ async def get_youtube_stream_url(video_id: str) -> str:
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": "bestaudio/best",
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
         "socket_timeout": 30,
     }
     try:

@@ -2,6 +2,10 @@
   display: grid;
   grid-template-columns: 220px 1fr;
   min-height: 100vh;
+  padding: 16px;
+  gap: 16px;
+  box-sizing: border-box;
+  align-items: start;
 }
 
 .library-main { padding: 32px 36px; }
@@ -49,7 +53,10 @@
 .track-thumb img { width:100%;height:100%;object-fit:cover; }
 .track-item-body { flex:1;overflow:hidden; }
 .track-item-title { font-size:0.875rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
-.track-item-meta { font-size:0.72rem;color:var(--text-muted);margin-top:2px; }
+.track-item-meta { display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:0.72rem;color:var(--text-muted);margin-top:2px; }
+.track-item-artist { max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary); }
+.track-meta { display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px; }
+.track-meta-artist { font-size:0.72rem;color:var(--text-muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
 .track-actions { display:flex;gap:6px;align-items:center; }
 .track-act-btn { background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:0.9rem;padding:6px;border-radius:8px;transition:all var(--transition);opacity:0; }
 .track-item:hover .track-act-btn { opacity:1; }

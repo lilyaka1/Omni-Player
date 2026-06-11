@@ -71,7 +71,7 @@ class TrackService:
             # Создать Track из метаданных без скачивания (download worker будет работать в фоне)
             existing = await self.create_track_from_url(
                 track_url,
-                download=False,
+                download=True,
                 target_downloads_dir=target_downloads_dir,
             )
 

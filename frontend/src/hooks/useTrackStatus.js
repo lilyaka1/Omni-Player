@@ -13,6 +13,8 @@ export default function useTrackStatus(trackId, { interval = 3000 } = {}) {
 
     async function fetchStatus() {
       if (!trackId) return;
+      // Skip polling for optimistic tracks (temp IDs)
+      if (typeof trackId === 'string' && (trackId.startsWith('temp_') || trackId.startsWith('temp_'))) return;
       try {
         const resp = await authFetch(`/api/player/tracks/${trackId}`);
         if (!resp.ok) return;

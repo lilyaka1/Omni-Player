@@ -335,8 +335,8 @@ export default function useLibraryData() {
     if (!trackId || !metadata) return;
 
     try {
-      const response = await authFetch(`/api/player/library/${trackId}/metadata`, {
-        method: 'PUT',
+      const response = await authFetch(`/api/player/library/${trackId}`, {
+        method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },

@@ -6,6 +6,7 @@ const wsTarget = apiTarget.replace(/^http/, 'ws');
 
 export default defineConfig({
   plugins: [react()],
+  publicDir: 'public',
   server: {
     host: '0.0.0.0',
     port: 5173,
@@ -18,6 +19,7 @@ export default defineConfig({
   '/rooms': { target: apiTarget },
   '/ws': { target: wsTarget, ws: true },
   '/stream': { target: apiTarget },
+  '/static/uploads': { target: apiTarget },
 }
   }
 });

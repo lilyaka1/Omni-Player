@@ -3,6 +3,7 @@ import { authFetch, clearToken, getToken } from '../utils/auth';
 import { showToast } from '../utils/toast';
 import { formatTime } from '../utils/format';
 import { SkeletonProfileCard, SkeletonCardGrid } from '../components/Skeleton';
+import Sidebar from '../components/Sidebar';
 
 function getProfileTargetFromUrl() {
   try {
@@ -167,24 +168,34 @@ export default function ProfilePage() {
 
   if (loading) {
     return (
-      <div className="page-section active">
-        <div className="profile-page">
-          <SkeletonProfileCard />
-          <div style={{ marginTop: '32px', width: '100%' }}>
-            <SkeletonCardGrid count={6} />
+      <div className="app-shell">
+        <Sidebar activePage="profile" />
+        <main className="main-content">
+          <div className="page-section active">
+            <div className="profile-page">
+              <SkeletonProfileCard />
+              <div style={{ marginTop: '32px', width: '100%' }}>
+                <SkeletonCardGrid count={6} />
+              </div>
+            </div>
           </div>
-        </div>
+        </main>
       </div>
     );
   }
 
   if (!profile) {
     return (
-      <div className="profile-page">
-        <div className="glass glass-primary profile-card" style={{ textAlign: 'center' }}>
-          <div className="empty-state"><i className="fa-solid fa-user-slash" /><p>Пользователь не найден</p></div>
-          <button className="btn btn-accent" onClick={() => (window.location.href = '/')}>На главную</button>
-        </div>
+      <div className="app-shell">
+        <Sidebar activePage="profile" />
+        <main className="main-content">
+          <div className="profile-page">
+            <div className="glass glass-primary profile-card" style={{ textAlign: 'center' }}>
+              <div className="empty-state"><i className="fa-solid fa-user-slash" /><p>Пользователь не найден</p></div>
+              <button className="btn btn-accent" onClick={() => (window.location.href = '/')}>На главную</button>
+            </div>
+          </div>
+        </main>
       </div>
     );
   }
@@ -193,9 +204,12 @@ export default function ProfilePage() {
 
   return (
     <>
-      <div id="toast-container" />
-      <div className="page-section active">
-        <div className="profile-page">
+      <div className="app-shell">
+        <Sidebar activePage="profile" />
+        <main className="main-content">
+          <div id="toast-container" />
+          <div className="page-section active">
+            <div className="profile-page">
           {/* ───── Шапка профиля ───── */}
           <div className="glass glass-primary profile-card" style={{ position: 'relative' }}>
           <div className="profile-card-tools">
@@ -342,8 +356,10 @@ export default function ProfilePage() {
             </div>
           )}
         </div>
+            </div>
+          </div>
+        </main>
       </div>
-        </div>
 
       {/* ───── Edit profile modal ───── */}
       {editing && (

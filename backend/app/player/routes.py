@@ -527,18 +527,37 @@ async def get_audio_file(
         if os.path.exists(candidate):
             local_path = candidate
 
-    # Если есть внешний stream_url — отдаём редирект, независимо от processing_status.
-    if track.stream_url:
-        stream_url = str(track.stream_url)
-        if stream_url.startswith("http://") or stream_url.startswith("https://"):
-            return RedirectResponse(url=stream_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
-
     # Enforce status: only ready tracks with local file may be streamed
     if track.processing_status != 'ready':
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Track not ready for streaming: {track.processing_status}"
         )
+
+    # Приоритет: локальный файл (чтобы не зависеть от протухших CDN ссылок)
+    if local_path and os.path.exists(local_path):
+        # Локальный файл есть — отдаём его напрямую
+        pass
+    elif track.stream_url:
+        # Локального файла нет — fallback на внешний stream_url
+        stream_url = str(track.stream_url)
+        if stream_url.startswith("http://") or stream_url.startswith("https://"):
+            # Проверяем не протухла ли ссылка
+            if track.stream_url_expires_at and track.stream_url_expires_at > datetime.utcnow():
+                return RedirectResponse(url=stream_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+            else:
+                # Ссылка протухла — пробуем обновить
+                try:
+                    svc = TrackService(db)
+                    info = await svc._extract_metadata(track.source_page_url)
+                    new_url = info.get('url')
+                    if new_url:
+                        track.stream_url = new_url
+                        track.stream_url_expires_at = datetime.utcnow() + timedelta(hours=24)
+                        db.commit()
+                        return RedirectResponse(url=new_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+                except Exception:
+                    pass
 
     if not local_path or not os.path.exists(local_path):
         raise HTTPException(

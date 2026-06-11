@@ -5,6 +5,7 @@ import { escHtml, formatTime } from '../utils/format';
 import ProfilePage from './ProfilePage';
 import { SkeletonRoomGrid } from '../components/Skeleton';
 import { useSwipe } from '../hooks/useSwipe';
+import Sidebar from '../components/Sidebar';
 
 const GENRES = [
   { name: 'Lofi', color: '#6c63ff,#a855f7' },
@@ -22,7 +23,6 @@ const GENRES = [
 export default function HomePage() {
   const token = getToken();
   const [page, setPage] = useState('home');
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [rooms, setRooms] = useState([]);
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
@@ -62,15 +62,6 @@ export default function HomePage() {
 
     return () => clearInterval(interval);
   }, []);
-
-  // Reload user when returning to home or after profile edit
-  useEffect(() => {
-    if (page === 'home') {
-      loadCurrentUser();
-    }
-    // Close sidebar on mobile when page changes
-    setSidebarOpen(false);
-  }, [page]);
 
   // Swipe navigation (left = next page, right = previous page)
   const pages = ['home', 'rooms', 'genres', 'profile'];
@@ -277,94 +268,7 @@ export default function HomePage() {
     <>
       <div id="toast-container" />
       <div className="app-shell">
-        <button className="hamburger-btn" onClick={() => setSidebarOpen(!sidebarOpen)}>
-          <i className={`fa-solid ${sidebarOpen ? 'fa-times' : 'fa-bars'}`} />
-        </button>
-        <aside className={`sidebar glass glass-primary ${sidebarOpen ? 'open' : ''}`}>
-          <div className="sidebar-logo">
-            <div className="logo-icon"><i className="fa-solid fa-circle-play" /></div>
-            <span>Omniplayer</span>
-          </div>
-
-          <nav>
-            <div className="nav-section-label">Главное</div>
-            <button className={`nav-item ${page === 'home' ? 'active' : ''}`} onClick={() => setPage('home')}>
-              <i className="fa-solid fa-house" /> Главная
-            </button>
-            <button className={`nav-item ${page === 'search' ? 'active' : ''}`} onClick={() => setPage('search')}>
-              <i className="fa-solid fa-magnifying-glass" /> Поиск
-            </button>
-
-            <div className="nav-section-label">Каталог</div>
-            <button className={`nav-item ${page === 'rooms' ? 'active' : ''}`} onClick={() => setPage('rooms')}>
-              <i className="fa-solid fa-door-open" /> Комнаты
-              {rooms.length > 0 && <span className="count-badge glass-flat">{rooms.length}</span>}
-            </button>
-            <button className={`nav-item ${page === 'genres' ? 'active' : ''}`} onClick={() => setPage('genres')}>
-              <i className="fa-solid fa-layer-group" /> Жанры
-            </button>
-              <button className="nav-item" onClick={() => (window.location.href = '/player')}>
-                <i className="fa-solid fa-bookmark" /> Локальный плеер
-            </button>
-
-            {!!myRooms.length && (
-              <div>
-                <div className="sidebar-divider" />
-                <div className="nav-section-label">Мои комнаты</div>
-                <div>
-                  {myRooms.slice(0, 5).map((room) => (
-                    <div className="nav-item" style={{ justifyContent: 'space-between', gap: 8 }} key={room.id}>
-                      <button
-                        style={{ all: 'unset', display: 'flex', alignItems: 'center', gap: 10, flex: 1, cursor: 'pointer' }}
-                        onClick={() => (window.location.href = `/user?room_id=${room.id}`)}
-                      >
-                        <i className="fa-solid fa-music" />
-                        <span className="truncate" style={{ flex: 1, textAlign: 'left' }}>{room.name}</span>
-                      </button>
-                      <button
-                        onClick={() => deleteMyRoom(room.id)}
-                        title="Удалить комнату"
-                        style={{ all: 'unset', cursor: 'pointer', color: '#ff6b6b', padding: '2px 4px', borderRadius: 8 }}
-                      >
-                        <i className="fa-solid fa-trash-can" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </nav>
-
-          <div className="sidebar-divider" />
-          <button className="nav-item" id="themeToggle">
-            <i className="fa-solid fa-moon" id="themeIcon" /> Тема
-          </button>
-
-          <div className="sidebar-footer">
-            {currentUser ? (
-              <div className="user-card" onClick={() => setPage('profile')} style={{ cursor: 'pointer' }}>
-                <div className="user-avatar">
-                  {currentUser.avatar_url ? (
-                    <img src={currentUser.avatar_url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                  ) : (
-                    currentUser.username?.[0]?.toUpperCase() || '?'
-                  )}
-                </div>
-                <div className="user-info">
-                  <div className="name">{currentUser.username}</div>
-                  <div className="role">{currentUser.is_admin ? 'Администратор' : 'Пользователь'}</div>
-                </div>
-                <button className="logout-btn" title="Выйти" onClick={(e) => { e.stopPropagation(); clearToken(); window.location.href = '/login'; }}>
-                  <i className="fa-solid fa-right-from-bracket" />
-                </button>
-              </div>
-            ) : (
-              <button className="nav-item" onClick={() => (window.location.href = '/login')}>
-                <i className="fa-solid fa-right-to-bracket" /> Войти
-              </button>
-            )}
-          </div>
-        </aside>
+        <Sidebar activePage={page} onPageChange={setPage} />
 
         <main className="main-content">
           {page === 'home' && (
