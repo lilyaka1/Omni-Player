@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
-import { initGlobalGlass } from './legacy/utils/glass';
-import { initGlobalTheme } from './legacy/utils/theme';
+import { initGlobalGlass } from './utils/glass';
+import { initGlobalTheme } from './utils/theme';
 import HomePage from './pages/HomePage';
 import LibraryPage from './pages/LibraryPage';
 import LivePage from './pages/LivePage';

@@ -31,7 +31,7 @@ async def _broadcast_queue_update(room_id: int, db: Session):
         from app.websocket.manager import manager as ws_manager
         if ws_manager and room_id in ws_manager.active_connections:
             payload = {
-                "type": "queue_update",
+                "type": "queue_updated",
                 "data": {
                     "queue": queue,
                     "queue_version": getattr(room, 'queue_version', 0),

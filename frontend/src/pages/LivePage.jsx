@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clearToken, getToken } from '../utils/auth';
+import { createRoomWebSocket } from '../utils/roomWebSocket';
 import { showToast } from '../utils/toast';
 
 function fmtSec(s) {
@@ -104,7 +105,7 @@ export default function LivePage() {
   useEffect(() => () => {
     const ws = wsRef.current;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-      try { ws.close(1000, 'live-page-unmount'); } catch {}
+      try { ws.close('live-page-unmount'); } catch {}
     }
   }, []);
 
@@ -279,54 +280,49 @@ export default function LivePage() {
       try { prev.close(1000, 'reconnect'); } catch {}
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/rooms/${roomId}?token=${token}`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
+    const ws = createRoomWebSocket({
+      roomId,
+      token,
+      onOpen: () => {
       setConnected(true);
       setRoomStatus(`Подключены: комната ${roomId}`);
       loadQueue(roomId);
-    };
+      },
 
-    ws.onclose = () => {
+      onClose: () => {
       setConnected(false);
       setRoomStatus('Отключены');
-    };
+      },
 
-    ws.onmessage = (event) => {
-      let msg = null;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
+      onMessage: (payload, msg) => {
 
       if (msg.type === 'room_state') {
-        lastRoomStateRef.current = msg.data || msg;
-        onRoomState(msg);
+        lastRoomStateRef.current = payload;
+        onRoomState(payload);
       }
 
       if (msg.type === 'chat') {
-        setChatMessages((prev) => [...prev, { user: msg.user || '?', content: msg.content || '' }]);
+        setChatMessages((prev) => [...prev, { user: payload.user || '?', content: payload.content || '' }]);
       }
 
-      if (msg.type === 'chat_history' && Array.isArray(msg.messages)) {
-        setChatMessages(msg.messages.map((m) => ({ user: m.username || m.user || '?', content: m.message || m.content || '' })));
+      if (msg.type === 'chat_history' && Array.isArray(payload.messages || payload)) {
+        const messages = payload.messages || payload;
+        setChatMessages(messages.map((m) => ({ user: m.username || m.user || '?', content: m.message || m.content || '' })));
       }
 
       if (msg.type === 'track_changed') {
-        if (msg.track) {
+        if (payload.track || payload.current_track) {
           // started_at — UNIX timestamp от сервера, используем для точной синхронизации
-          const startedAt = Number(msg.track.started_at);
-          setNowPlaying(msg.track);
-          setNowPlayingId(msg.track.id || null);
+          const track = payload.track || payload.current_track;
+          const startedAt = Number(track.started_at);
+          setNowPlaying(track);
+          setNowPlayingId(track.id || null);
           setStartedAtMs(
             Number.isFinite(startedAt) && startedAt > 0
               ? startedAt * 1000  // сервер шлёт секунды → JS ожидает миллисекунды
               : Date.now()
           );
-          setDurationSec(Number(msg.track.duration) || 0);
+          setDurationSec(Number(track.duration) || 0);
           setBroadcastLive(true);
           setStatusText('Статус: активно');
           // Не удаляем текущий трек — очередь показывает все треки, nowPlayingId выделяет играющий
@@ -340,16 +336,16 @@ export default function LivePage() {
         }
       }
 
-      if (msg.type === 'track_change' && msg.data?.current_track) {
-        const startedAt = Number(msg.data.current_track.started_at);
-        setNowPlaying(msg.data.current_track);
-        setNowPlayingId(msg.data.current_track.id || null);
+      if (msg.type === 'track_change' && payload?.current_track) {
+        const startedAt = Number(payload.current_track.started_at);
+        setNowPlaying(payload.current_track);
+        setNowPlayingId(payload.current_track.id || null);
         setStartedAtMs(
           Number.isFinite(startedAt) && startedAt > 0
             ? startedAt * 1000
             : Date.now()
         );
-        setDurationSec(Number(msg.data.current_track.duration) || 0);
+        setDurationSec(Number(payload.current_track.duration) || 0);
         // Не удаляем текущий трек — очередь показывает все треки, nowPlayingId выделяет играющий
       }
 
@@ -357,7 +353,7 @@ export default function LivePage() {
         // WS-сервер не присылает тело очереди — берём из последнего room_state,
         // или запрашиваем через HTTP
         const lastState = lastRoomStateRef.current;
-        if (lastState && Array.isArray(lastState.queue) && lastState.queue.length) {
+        if (lastState && Array.isArray(lastState.queue)) {
           setQueue(lastState.queue.map(normalizeTrackMeta));
         } else {
           // Фоллбэк: HTTP запрос очереди
@@ -365,19 +361,21 @@ export default function LivePage() {
         }
       }
 
-      if (msg.type === 'queue_reordered' && Array.isArray(msg.queue)) {
+      if (msg.type === 'queue_reordered' && Array.isArray(payload.queue)) {
         // Обновляем локальную копию очереди из WS payload
-        setQueue(msg.queue.map(normalizeTrackMeta));
+        setQueue(payload.queue.map(normalizeTrackMeta));
       }
 
-      if (msg.type === 'thumbnail_updated' && msg.track_id && msg.thumbnail) {
-        setQueue((prev) => prev.map((t) => (t.id === msg.track_id ? { ...t, thumbnail: msg.thumbnail } : t)));
-        if (msg.track_id === nowPlayingId && nowPlaying) {
-          setNowPlaying({ ...nowPlaying, thumbnail: msg.thumbnail });
+      if (msg.type === 'thumbnail_updated' && payload.track_id && payload.thumbnail) {
+        setQueue((prev) => prev.map((t) => (t.id === payload.track_id ? { ...t, thumbnail: payload.thumbnail } : t)));
+        if (payload.track_id === nowPlayingId && nowPlaying) {
+          setNowPlaying({ ...nowPlaying, thumbnail: payload.thumbnail });
         }
       }
 
-    };
+      },
+    });
+    wsRef.current = ws;
   }
 
   function wsSend(payload) {
