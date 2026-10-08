@@ -26,24 +26,6 @@ class Settings(BaseSettings):
     BUFFER_TIMEOUT: int = 30  # seconds
     FFMPEG_PATH: str = "ffmpeg"
     
-    # Voice inserts
-    TTS_ENABLED: bool = True
-    TTS_MODEL_PATH: Optional[str] = None
-    TTS_MODEL_DIR: Optional[str] = None
-    TTS_AUDIO_DIR: Optional[str] = None
-    TTS_MAX_CONCURRENT: int = 2
-    PIPER_BIN: Optional[str] = None
-    RVC_MODEL_PATH: Optional[str] = None
-    RVC_MODEL_DIR: Optional[str] = None
-    RVC_ENABLED: bool = True
-    RVC_CONFIG_PATH: Optional[str] = None
-    RVC_SPEAKER: int = 0
-    RVC_CACHE_DIR: Optional[str] = None
-    RVC_DEFAULT_PITCH: int = 0
-    RVC_INDEX_RATE: float = 0.75
-    RVC_PROTECT: float = 0.33
-    MAX_CONCURRENT_RVC: int = 2
-
     # HLS
     HLS_ENABLED: bool = True
     HLS_SEGMENT_DURATION: int = 6

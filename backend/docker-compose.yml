@@ -26,8 +26,6 @@ services:
     volumes:
       - ../downloads:/app/downloads
       - ./app:/app/app
-      - ../tts_audio:/app/tts_audio
-      - ../tts_models:/app/tts_models
     restart: unless-stopped
 
 volumes:

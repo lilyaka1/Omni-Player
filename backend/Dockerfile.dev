@@ -9,7 +9,7 @@ RUN apt-get update \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python deps (skip requirements-rvc which pulls heavy ML wheels)
+# Copy and install Python dependencies
 COPY requirements.txt ./
 ENV PIP_DEFAULT_TIMEOUT=120
 RUN pip install --no-cache-dir --retries 10 --default-timeout 120 -r requirements.txt

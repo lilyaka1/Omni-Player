@@ -22,10 +22,8 @@ backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))
 
 static_dir = backend_dir / "static"
-tts_audio_dir = backend_dir / "tts_audio"
 
 static_dir.mkdir(parents=True, exist_ok=True)
-tts_audio_dir.mkdir(parents=True, exist_ok=True)
 
 
 @asynccontextmanager
@@ -52,7 +50,6 @@ app.add_middleware(
 
 # Static
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-app.mount("/tts", StaticFiles(directory=str(tts_audio_dir)), name="tts")
 
 
 # -----------------------------
@@ -79,7 +76,6 @@ _register("Rooms", "app.domains.rooms.router")
 _register("Tracks", "app.domains.tracks.router")
 _register("Player", "app.player.routes")
 _register("Profiles", "app.domains.profiles.router")
-_register("Voice", "app.voice_inserts.router")
 _register("WebSocket", "app.websocket.router")
 
 # 🔥 ВАЖНО — ЭТО ДОЛЖНО БЫТЬ

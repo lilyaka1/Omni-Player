@@ -82,42 +82,6 @@ class TestRoomManager:
         with pytest.raises(RuntimeError):
             state.add_listener()
 
-    def test_voice_insert_queue_is_copied_and_signature_is_stored(self):
-        state = RoomState(room_id=1)
-        inserts = [{"id": 1, "play_after_track_id": 10}]
-
-        state.set_voice_insert_queue(inserts, signature="sig-1")
-        inserts[0]["id"] = 999
-
-        assert state.voice_insert_signature == "sig-1"
-        assert state.voice_insert_queue == [{"id": 1, "play_after_track_id": 10}]
-
-    def test_voice_insert_same_signature_does_not_replace_queue(self):
-        state = RoomState(room_id=1)
-
-        state.set_voice_insert_queue([{"id": 1}], signature="same")
-        state.set_voice_insert_queue([{"id": 2}], signature="same")
-
-        assert state.voice_insert_queue == [{"id": 1}]
-
-    def test_consume_voice_inserts_for_track(self):
-        state = RoomState(room_id=1)
-        state.set_voice_insert_queue(
-            [
-                {"id": 1, "play_after_track_id": 10},
-                {"id": 2, "play_after_track_id": 20},
-                {"id": 3, "play_after_track_id": None},
-            ]
-        )
-
-        matched = state.consume_voice_inserts(10)
-
-        assert matched == [{"id": 1, "play_after_track_id": 10}]
-        assert state.voice_insert_queue == [
-            {"id": 2, "play_after_track_id": 20},
-            {"id": 3, "play_after_track_id": None},
-        ]
-
     def test_skip_event_is_created_lazily_and_reused(self):
         state = RoomState(room_id=1)
 

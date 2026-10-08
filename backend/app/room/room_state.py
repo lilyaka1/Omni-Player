@@ -3,7 +3,7 @@ RoomState — состояние одной комнаты: broadcast, слуш�
 Один источник, много слушателей.
 """
 import asyncio
-from typing import List, Optional
+from typing import List
 
 from app.room.buffer import RingBuffer, find_mp3_sync
 
@@ -20,8 +20,6 @@ class RoomState:
         self.current_track_id = None
         self._skip_event: asyncio.Event = None  # Ленивая инициализация
         self._ring_buffer: RingBuffer = RingBuffer()
-        self.voice_insert_queue: List[dict] = []
-        self.voice_insert_signature: Optional[str] = None
 
     @property
     def skip_event(self) -> asyncio.Event:
@@ -82,41 +80,6 @@ class RoomState:
         if q in self.listeners:
             self.listeners.remove(q)
         print(f"📻 Room {self.room_id}: listener removed (total: {len(self.listeners)})")
-
-    def set_voice_insert_queue(self, inserts: List[dict], signature: Optional[str] = None):
-        if signature is not None and signature == self.voice_insert_signature:
-            return
-        self.voice_insert_queue = [dict(item) for item in inserts]
-        self.voice_insert_signature = signature
-
-    # Backward-compatible alias used by older call sites.
-    def set_voice_inserts(self, inserts: List[dict], signature: Optional[str] = None):
-        self.set_voice_insert_queue(inserts, signature)
-
-    def consume_voice_inserts(self, track_id: Optional[int]):
-        if not self.voice_insert_queue:
-            return []
-
-        matched = []
-        remaining = []
-        for item in self.voice_insert_queue:
-            play_after_track_id = item.get("play_after_track_id")
-            if track_id is None:
-                should_play = play_after_track_id is None
-            else:
-                should_play = play_after_track_id == track_id
-
-            if should_play:
-                matched.append(item)
-            else:
-                remaining.append(item)
-
-        self.voice_insert_queue = remaining
-        return matched
-
-    # Backward-compatible alias used by older call sites.
-    def pop_voice_inserts_for_track(self, track_id: Optional[int]):
-        return self.consume_voice_inserts(track_id)
 
     async def broadcast_chunk(self, chunk: bytes):
         """Отправить чанк всем слушателям и сохранить в ring buffer."""

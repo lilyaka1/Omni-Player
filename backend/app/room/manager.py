@@ -7,8 +7,7 @@ RoomManager — оркестратор broadcast-потоков для всех 
       ЛОКАЛЬНЫЙ путь в RoomTrack.stream_url.
    2. broadcast_loop читает RoomTrack.now_playing → берёт локальный файл →
       запускает ffmpeg → льёт чанки слушателям.
-   3. После трека: проверяет ready voice inserts → проигрывает их по очереди
-      (через тот же ffmpeg+RoomState) → advance_track → следующий трек.
+    3. После трека: advance_track → следующий трек.
 """
 from __future__ import annotations
 
@@ -21,7 +20,6 @@ from typing import Dict, Optional
 from app.room.ffmpeg import stream_ffmpeg
 from app.room.queue import advance_track, peek_next_track
 from app.room.room_state import RoomState
-from app.voice_inserts.queue import build_room_voice_sequence, get_room_voice_sequence_signature
 
 # Куда складываем локальные mp3
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -86,21 +84,7 @@ class RoomManager:
                 self.prefetch_room_files(room_id, db_session_factory, soundcloud_client)
             )
 
-            # Pre-playback hook: фиксируем voice inserts до первого запуска loop.
-            try:
-                await self._prepare_room_voice_sequence(bc, room_id)
-            except Exception as e:
-                print(f"⚠️ Room {room_id}: voice inserts pre-playback hook failed: {e}")
-
             print("[ROOM START] room_id =", room_id)
-            print("[ROOM START] inserts =", len(bc.voice_insert_queue))
-
-            # Параллельно прогреваем общий TTS-кэш и фоном докачиваем файлы для всех треков комнаты.
-            try:
-                from app.voice_inserts.queue import prewarm_room
-                asyncio.create_task(prewarm_room(room_id))
-            except Exception as e:
-                print(f"⚠️ Room {room_id}: voice cache prewarm not started: {e}")
 
             bc.running = True
             bc.task = asyncio.create_task(
@@ -279,14 +263,6 @@ class RoomManager:
     #  Broadcast loop                                                      #
     # ──────────────────────────────────────────────────────────────────── #
 
-    async def _prepare_room_voice_sequence(self, bc: RoomState, room_id: int):
-        voice_sequence = await build_room_voice_sequence(room_id)
-        bc.set_voice_insert_queue(
-            voice_sequence,
-            get_room_voice_sequence_signature(room_id),
-        )
-        return voice_sequence
-
     async def _broadcast_loop(
         self,
         bc: RoomState,
@@ -350,26 +326,6 @@ class RoomManager:
             finally:
                 db.close()
 
-        def _count_remaining(current_track_id: int) -> int:
-            db = db_session_factory()
-            try:
-                cur = db.query(RoomTrack).filter(RoomTrack.id == current_track_id).first()
-                if not cur:
-                    return 0
-                if cur.order is not None:
-                    return (
-                        db.query(RoomTrack)
-                        .filter(RoomTrack.room_id == room_id, RoomTrack.order >= cur.order)
-                        .count()
-                    )
-                return (
-                    db.query(RoomTrack)
-                    .filter(RoomTrack.room_id == room_id, RoomTrack.id >= current_track_id)
-                    .count()
-                )
-            finally:
-                db.close()
-
         print(f"🔄 Room {room_id}: broadcast loop started")
         last_track_id = None
         consecutive_skips = 0
@@ -393,15 +349,6 @@ class RoomManager:
                 bc.skip_event.clear()
 
                 print("[TRACK START]", track_id)
-
-                # voice prewarm если очередь к концу
-                try:
-                    remaining = await asyncio.to_thread(_count_remaining, track_id)
-                    if remaining <= 5:
-                        from app.voice_inserts.queue import on_queue_change
-                        asyncio.create_task(on_queue_change(room_id, remaining))
-                except Exception as e:
-                    print(f"⚠️ [voice] queue warmup check failed: {e}")
 
                 # Гарантируем, что у нас локальный файл
                 local_path = state["stream_url"]
@@ -463,10 +410,7 @@ class RoomManager:
                     await asyncio.sleep(1)
                     continue
 
-                # Трек закончился штатно → проигрываем готовые voice inserts.
                 print("[TRACK END]", track_id)
-                await self._play_voice_inserts(bc, room_id, track_id)
-
                 advanced = await advance_track(room_id, db_session_factory)
                 if not advanced:
                     bc.running = False
@@ -484,45 +428,6 @@ class RoomManager:
         bc.running = False
         await bc.broadcast_end()
         print(f"🔇 Room {room_id}: broadcast loop ended")
-
-    # ──────────────────────────────────────────────────────────────────── #
-    #  Voice inserts playback                                              #
-    # ──────────────────────────────────────────────────────────────────── #
-
-    async def _play_voice_inserts(self, bc: RoomState, room_id: int, just_played_track_id: int):
-        """Между треками — проигрываем уже подготовленные inserts."""
-        inserts = bc.consume_voice_inserts(just_played_track_id)
-        if not inserts:
-            return
-
-        print("[INSERT QUEUE SIZE]", len(inserts))
-        print(f"🗣️  [voice] room {room_id}: playing {len(inserts)} inserts")
-        for ins in inserts:
-            audio_path = getattr(ins, "audio_path", None) or (
-                ins.get("audio_path") if isinstance(ins, dict) else None
-            )
-            insert_id = getattr(ins, "id", None) or (
-                ins.get("id") if isinstance(ins, dict) else None
-            )
-            print("[INSERT PLAY]", insert_id)
-            if not audio_path or not os.path.isfile(audio_path):
-                print(f"⚠️ [voice] insert {insert_id}: file missing ({audio_path})")
-                continue
-
-            try:
-                await self._broadcast_insert_event(room_id, insert_id, "playing")
-                result = await stream_ffmpeg(bc, audio_path)
-                if result is False:
-                    return
-                if insert_id is not None:
-                    try:
-                        from app.voice_inserts.queue import mark_insert_played
-                        await mark_insert_played(insert_id)
-                    except Exception as e:
-                        print(f"⚠️ [voice] mark_insert_played({insert_id}) failed: {e}")
-                await self._broadcast_insert_event(room_id, insert_id, "played")
-            except Exception as e:
-                print(f"⚠️ [voice] insert {insert_id} playback error: {e}")
 
     # ──────────────────────────────────────────────────────────────────── #
     #  Helpers                                                             #
@@ -558,18 +463,5 @@ class RoomManager:
             }))
         except Exception as e:
             print(f"⚠️ thumbnail broadcast failed: {e}")
-
-    async def _broadcast_insert_event(self, room_id: int, insert_id, status: str):
-        import json
-        try:
-            from app.websocket.manager import manager as _mgr
-            await _mgr.broadcast(room_id, json.dumps({
-                "type": "voice_insert_status",
-                "insert_id": insert_id,
-                "status": status,
-            }))
-        except Exception:
-            pass
-
 
 room_manager = RoomManager()

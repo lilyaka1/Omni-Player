@@ -25,15 +25,9 @@ services:
       - ./backend/.env
     environment:
       - DATABASE_URL=postgresql+psycopg://user:password@db:5432/omni_player
-      - TTS_AUDIO_DIR=/app/tts_audio
-      - TTS_MODEL_DIR=/app/tts_models
-      - PIPER_BIN=piper
-      - RVC_ENABLED=false
     volumes:
       - ./backend:/app
       - ./frontend:/app/frontend
-      - ./tts_audio:/app/tts_audio
-      - ./tts_models:/app/tts_models
       - ./downloads:/app/downloads
     depends_on:
       db:
@@ -52,6 +46,7 @@ services:
       - VITE_API_TARGET=http://backend:8000
     volumes:
       - ./frontend:/app
+      - /app/node_modules
 
 volumes:
   postgres_data:

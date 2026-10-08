@@ -13,8 +13,6 @@ from app.websocket.handlers import (
     handle_playback_control,
     handle_playback_ended,
 )
-from app.voice_inserts.ws_handlers import handle_insert_message
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
@@ -56,9 +54,6 @@ async def websocket_endpoint(
             elif msg_type == "reorder_queue":
                 from app.websocket.handlers import handle_reorder_queue
                 await handle_reorder_queue(room_id, user, data)
-            elif isinstance(msg_type, str) and msg_type.startswith("insert_"):
-                await handle_insert_message(websocket, room_id, user.id, user_role, data)
-
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
         room_state = manager.get_room_state(room_id)

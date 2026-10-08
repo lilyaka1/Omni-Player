@@ -49,12 +49,6 @@ export default function LivePage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [chatText, setChatText] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
-  const [inserts, setInserts] = useState([]);
-  const [insertText, setInsertText] = useState('');
-  const [insertVoice, setInsertVoice] = useState('en_US-libritts-high');
-  const [insertAfterTrackId, setInsertAfterTrackId] = useState('');
-  const [insertSending, setInsertSending] = useState(false);
-  const [ttsStatus, setTtsStatus] = useState(null);
   const wsRef = useRef(null);
   const dragSourceIdRef = useRef(null);
   const lastRoomStateRef = useRef(null);
@@ -91,16 +85,6 @@ export default function LivePage() {
     checkStatus(selectedRoomId);
     loadQueue(selectedRoomId);
   }, [selectedRoomId]);
-
-  useEffect(() => {
-    fetch('/api/voice/status')
-      .then(async (res) => {
-        if (!res.ok) return;
-        const data = await res.json().catch(() => null);
-        if (data) setTtsStatus(data);
-      })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!startedAtMs) {
@@ -303,13 +287,11 @@ export default function LivePage() {
       setConnected(true);
       setRoomStatus(`Подключены: комната ${roomId}`);
       loadQueue(roomId);
-      try { ws.send(JSON.stringify({ type: 'insert_list' })); } catch {}
     };
 
     ws.onclose = () => {
       setConnected(false);
       setRoomStatus('Отключены');
-      setInserts([]);
     };
 
     ws.onmessage = (event) => {
@@ -395,76 +377,6 @@ export default function LivePage() {
         }
       }
 
-      // ── Voice insert (TTS) события ─────────────────────────────────
-      if (msg.type === 'insert_list' && Array.isArray(msg.inserts)) {
-        setInserts(msg.inserts.map((i) => ({
-          id: i.id,
-          text: i.text,
-          status: i.status,
-          scheduled_at: i.scheduled_at,
-          audio_url: i.audio_url || null,
-          duration_sec: i.duration_sec || null,
-          play_after_track_id: i.play_after_track_id || null,
-        })));
-      }
-
-      if (msg.type === 'insert_created' && msg.insert) {
-        setInserts((prev) => {
-          if (prev.some((p) => p.id === msg.insert.id)) return prev;
-          return [...prev, {
-            id: msg.insert.id,
-            text: msg.insert.text,
-            status: msg.insert.status || 'pending',
-            scheduled_at: msg.insert.scheduled_at,
-            play_after_track_id: msg.insert.play_after_track_id || insertAfterTrackId || null,
-          }];
-        });
-      }
-
-      if (msg.type === 'insert_ready' && msg.insert) {
-        setInserts((prev) => prev.map((i) => i.id === msg.insert.id
-          ? { ...i, status: 'ready', audio_url: msg.insert.audio_url || i.audio_url, duration_sec: msg.insert.duration_sec || i.duration_sec }
-          : i));
-      }
-
-      if (msg.type === 'insert_failed' && msg.insert) {
-        setInserts((prev) => prev.map((i) => i.id === msg.insert.id
-          ? { ...i, status: 'failed', error: msg.insert.error || 'TTS failed' }
-          : i));
-      }
-
-      if (msg.type === 'insert_timeout' && msg.insert) {
-        setInserts((prev) => prev.map((i) => i.id === msg.insert.id
-          ? { ...i, status: 'timeout' }
-          : i));
-      }
-
-      if (msg.type === 'insert_cancelled') {
-        const id = msg.insert_id || msg.id;
-        if (id) {
-          setInserts((prev) => prev.map((i) => i.id === id ? { ...i, status: 'cancelled' } : i));
-        }
-      }
-
-      if (msg.type === 'insert_cleared') {
-        setInserts((prev) => prev.map((i) => (
-          ['pending', 'generating', 'ready'].includes(i.status) ? { ...i, status: 'cancelled' } : i
-        )));
-      }
-
-      if (msg.type === 'voice_insert_status') {
-        const id = msg.insert_id;
-        const status = msg.status;
-        if (id && status) {
-          setInserts((prev) => prev.map((i) => i.id === id ? { ...i, status } : i));
-        }
-      }
-
-      if (msg.type === 'error' && msg.msg) {
-        setInserts((prev) => prev);
-        // Не критично — просто оповещаем в чате как системку
-        // alert(`TTS error: ${msg.msg}`);
-      }
     };
   }
 
@@ -632,90 +544,8 @@ export default function LivePage() {
     if (ok) setChatText('');
   }
 
-  // ── Voice insert (TTS) helpers ────────────────────────────────────────
-  function sendInsert() {
-    const text = insertText.trim();
-    if (!text) {
-      alert('Введите текст вставки');
-      return;
-    }
-    if (text.length < 2) {
-      alert('Минимум 2 символа');
-      return;
-    }
-    if (text.length > 500) {
-      alert('Максимум 500 символов');
-      return;
-    }
-    if (!connected) {
-      alert('Подключитесь к комнате');
-      return;
-    }
-    setInsertSending(true);
-    const ok = wsSend({
-      type: 'insert_create',
-      text,
-      voice_id: insertVoice || 'en_US-libritts-high',
-      play_after_track_id: insertAfterTrackId ? Number(insertAfterTrackId) : null,
-    });
-    if (ok) {
-      setInsertText('');
-    }
-    setTimeout(() => setInsertSending(false), 400);
-  }
-
-  function cancelInsert(insertId) {
-    if (!insertId) return;
-    wsSend({ type: 'insert_cancel', insert_id: insertId });
-  }
-
-  function clearAllInserts() {
-    if (!connected) return;
-    if (!window.confirm('Очистить все активные TTS-вставки?')) return;
-    wsSend({ type: 'insert_clear' });
-  }
-
-  function previewInsertAudio(audioUrl) {
-    if (!audioUrl) return;
-    try {
-      const audio = new Audio(audioUrl);
-      audio.play().catch(() => {});
-    } catch {
-      // noop
-    }
-  }
-
-  function insertStatusLabel(status) {
-    switch (status) {
-      case 'pending': return 'В очереди';
-      case 'generating': return 'Генерация…';
-      case 'ready': return 'Готова';
-      case 'playing': return 'Играет';
-      case 'played': return 'Отыграна';
-      case 'failed': return 'Ошибка';
-      case 'timeout': return 'Таймаут';
-      case 'cancelled': return 'Отменена';
-      default: return status || '—';
-    }
-  }
-
   function queueFlowItems() {
-    const activeInserts = inserts.filter((i) => !['cancelled', 'failed', 'timeout'].includes(i.status));
-    const attached = new Set();
-    const flow = [];
-    queue.forEach((track) => {
-      flow.push({ kind: 'track', ...track });
-      activeInserts
-        .filter((ins) => Number(ins.play_after_track_id) === Number(track.id))
-        .forEach((ins) => {
-          attached.add(ins.id);
-          flow.push({ kind: 'insert', ...ins });
-        });
-    });
-    activeInserts
-      .filter((ins) => !ins.play_after_track_id || !attached.has(ins.id))
-      .forEach((ins) => flow.push({ kind: 'insert', ...ins }));
-    return flow;
+    return queue.map((track) => ({ kind: 'track', ...track }));
   }
 
   function onDragStart(trackId) {
@@ -865,26 +695,7 @@ export default function LivePage() {
               </div>
               <div className="live-admin-queue-list">
                 {!queue.length && <div className="empty-state"><p>Очередь пуста</p></div>}
-                {queueFlowItems().map((t) => t.kind === 'insert' ? (
-                  <div className={`live-admin-queue-item voice-insert status-${t.status}`} key={`insert-${t.id}`}>
-                    <span className="drag"><i className="fa-solid fa-microphone-lines" /></span>
-                    <div className="ph"><i className="fa-solid fa-wave-square" /></div>
-                    <div className="meta">
-                      <div className="title">{t.text}</div>
-                      <div className="artist">TTS · {insertStatusLabel(t.status)}{t.duration_sec ? ` · ${Math.round(t.duration_sec)}s` : ''}</div>
-                    </div>
-                    {t.audio_url && (
-                      <button className="btn btn-icon" title="Прослушать" onClick={() => previewInsertAudio(t.audio_url)}>
-                        <i className="fa-solid fa-play" />
-                      </button>
-                    )}
-                    {['pending', 'generating', 'ready'].includes(t.status) && (
-                      <button className="btn btn-icon" title="Отменить" onClick={() => cancelInsert(t.id)}>
-                        <i className="fa-solid fa-xmark" />
-                      </button>
-                    )}
-                  </div>
-                ) : (
+                {queueFlowItems().map((t) => (
                   <div
                     key={t.id}
                     className={`live-admin-queue-item ${t.id === nowPlayingId ? 'playing' : ''}`}
@@ -953,109 +764,6 @@ export default function LivePage() {
                         </div>
                       </div>
                       <button className="btn" onClick={() => addTrackToEnd(t)}>В конец очереди</button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="live-admin-tts glass glass-secondary">
-              <div className="live-admin-tts-head">
-                <h3>Голосовые вставки (TTS)</h3>
-                {ttsStatus && (
-                  <span className={`live-admin-tts-badge ${ttsStatus.rvc_enabled ? 'on' : 'off'}`}>
-                    {ttsStatus.rvc_enabled ? 'RVC: вкл' : 'RVC: выкл'}
-                    {ttsStatus.device ? ` · ${ttsStatus.device}` : ''}
-                  </span>
-                )}
-              </div>
-
-              <div className="live-admin-row">
-                <input
-                  className="input"
-                  type="text"
-                  value={insertText}
-                  onChange={(e) => setInsertText(e.target.value)}
-                  placeholder="Текст вставки (English, 2–500 символов)"
-                  maxLength={500}
-                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), sendInsert())}
-                  disabled={!connected || insertSending}
-                />
-                <select
-                  className="input"
-                  value={insertVoice}
-                  onChange={(e) => setInsertVoice(e.target.value)}
-                  disabled={!connected || insertSending}
-                  style={{ maxWidth: 180 }}
-                >
-                  <option value="en_US-libritts-high">en_US-libritts-high</option>
-                </select>
-                <select
-                  className="input"
-                  value={insertAfterTrackId}
-                  onChange={(e) => setInsertAfterTrackId(e.target.value)}
-                  disabled={!connected || insertSending}
-                  style={{ maxWidth: 220 }}
-                  title="Позиция в очереди"
-                >
-                  <option value="">В конец / без привязки</option>
-                  {queue.map((t) => (
-                    <option key={t.id} value={t.id}>После: {t.title}</option>
-                  ))}
-                </select>
-                <button
-                  className="btn btn-accent"
-                  onClick={sendInsert}
-                  disabled={!connected || insertSending || !insertText.trim()}
-                >
-                  Отправить
-                </button>
-              </div>
-
-              <div className="live-admin-tts-meta">
-                <span className="live-admin-hint">{insertText.length}/500</span>
-                <button
-                  className="btn"
-                  onClick={clearAllInserts}
-                  disabled={!connected || !inserts.some((i) => ['pending', 'generating', 'ready'].includes(i.status))}
-                >
-                  Очистить активные
-                </button>
-              </div>
-
-              <div className="live-admin-tts-list">
-                {!inserts.length && <div className="empty-state"><p>Пока нет вставок</p></div>}
-                {inserts.map((ins) => {
-                  const canCancel = ['pending', 'generating', 'ready'].includes(ins.status);
-                  const canPlay = ins.audio_url && ['ready', 'playing', 'played'].includes(ins.status);
-                  return (
-                    <div className={`live-admin-tts-item status-${ins.status}`} key={ins.id}>
-                      <div className="meta">
-                        <div className="title">{ins.text}</div>
-                        <div className="artist">
-                          {insertStatusLabel(ins.status)}
-                          {ins.duration_sec ? ` · ${Math.round(ins.duration_sec)}s` : ''}
-                          {ins.error ? ` · ${ins.error}` : ''}
-                        </div>
-                      </div>
-                      {canPlay && (
-                        <button
-                          className="btn btn-icon"
-                          title="Прослушать"
-                          onClick={() => previewInsertAudio(ins.audio_url)}
-                        >
-                          <i className="fa-solid fa-play" />
-                        </button>
-                      )}
-                      {canCancel && (
-                        <button
-                          className="btn btn-icon"
-                          title="Отменить"
-                          onClick={() => cancelInsert(ins.id)}
-                        >
-                          <i className="fa-solid fa-xmark" />
-                        </button>
-                      )}
                     </div>
                   );
                 })}

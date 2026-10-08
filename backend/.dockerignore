@@ -11,8 +11,6 @@ __pycache__
 .DS_Store
 downloads
 output
-tts_audio
-tts_models
 wheels
 *.db
 *.sqlite

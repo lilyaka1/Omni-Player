@@ -28,7 +28,6 @@
 | 🏠**Комнаты**                | Публичные и приватные (с паролем) комнаты для совместного прослушивания |
 | ⏯️**Синхронизация**  | WebSocket-синхронизация воспроизведения с задержкой < 1 сек                                  |
 | 💬**Чат**                        | Текстовый чат в реальном времени с модерацией                                                  |
-| 🎤**Voice Inserts**                 | TTS-анонсы и RVC-обработка голоса                                                                               |
 | 📱**Адаптивный UI**       | Современный интерфейс на React + TailwindCSS                                                                    |
 
 ---
@@ -125,7 +124,6 @@ make test-api
 | 🎵 Tracks    | `/api/tracks`   | Загрузка и поиск треков           |
 | ▶️ Player  | `/api/player`   | Управление воспроизведением |
 | 👤 Profiles  | `/api/profiles` | Профили пользователей             |
-| 🎤 Voice     | `/api/voice`    | TTS и RVC интеграция                       |
 | 📡 WebSocket | `/ws`           | Real-time коммуникации                    |
 | 🎬 Stream    | `/api/stream`   | HLS аудио стриминг                       |
 
@@ -167,7 +165,6 @@ Omni-Player/
 │   │   ├── room/              # Менеджер, очередь, HLS
 │   │   ├── websocket/         # WebSocket handlers
 │   │   ├── stream/            # HLS стриминг
-│   │   └── voice_inserts/     # TTS + RVC
 │   ├── tests/                 # 15+ тестовых модулей
 │   └── requirements.txt
 │
