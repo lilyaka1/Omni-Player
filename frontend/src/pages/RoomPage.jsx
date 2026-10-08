@@ -140,14 +140,23 @@ export default function RoomPage() {
     if (currentTrackIdRef.current !== trackId) {
       currentTrackIdRef.current = trackId;
       audio.src = `/stream/room/${roomId}/stream?track=${trackId}&t=${Date.now()}`;
+      const syncPosition = () => {
+        const duration = Number(audio.duration);
+        const target = Math.max(0, Math.min(Number(position) || 0, duration > 0 ? duration - 0.25 : Number(position) || 0));
+        if (Math.abs(audio.currentTime - target) > 0.25) audio.currentTime = target;
+      };
+      audio.addEventListener('loadedmetadata', syncPosition, { once: true });
       audio.load();
+    }
+    if (audio.readyState >= 1 && Math.abs(audio.currentTime - (Number(position) || 0)) > 1.5) {
+      audio.currentTime = Math.max(0, Number(position) || 0);
     }
     if (isPlaying) {
       audio.play().catch(() => showToast('Нажмите Play, чтобы разрешить воспроизведение', 'error'));
     } else {
       audio.pause();
     }
-  }, [currentTrack, isPlaying, roomId]);
+  }, [currentTrack, isPlaying, position, roomId]);
 
   useEffect(() => {
     if (!isPlaying) return undefined;
