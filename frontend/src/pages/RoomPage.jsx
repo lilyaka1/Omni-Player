@@ -109,17 +109,19 @@ export default function RoomPage() {
       onOpen: () => setConnected(true),
       onClose: () => setConnected(false),
       onMessage: (data, message) => {
+        console.log('[ROOM WS]', message.type, data);
+
         if (message.type === 'room_state' || message.type === 'track_change' || message.type === 'track_changed') {
-        applySnapshot(data);
+          applySnapshot(data);
         }
         if (message.type === 'queue_updated' || message.type === 'queue_reordered') {
-        if (Array.isArray(data.queue)) setQueue(data.queue.map(normalizeTrack));
+          if (Array.isArray(data.queue)) setQueue(data.queue.map(normalizeTrack));
         }
         if (message.type === 'chat') {
-        setChatMessages((previous) => [...previous, data]);
+          setChatMessages((previous) => [...previous, data]);
         }
         if (message.type === 'chat_history') {
-        setChatMessages(Array.isArray(data) ? data : data.messages || []);
+          setChatMessages(Array.isArray(data) ? data : data.messages || []);
         }
         if (message.type === 'user_count') loadListeners();
       },
@@ -136,32 +138,135 @@ export default function RoomPage() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentTrack) return;
+
+    console.log('[AUDIO SYNC]', {
+      time: new Date().toISOString(),
+      trackId: currentTrack.id,
+      previousTrackId: currentTrackIdRef.current,
+      position,
+      currentTime: audio.currentTime,
+      paused: audio.paused,
+      readyState: audio.readyState,
+      isPlaying,
+      src: audio.currentSrc || audio.src,
+    });
+
     const trackId = Number(currentTrack.id);
     if (currentTrackIdRef.current !== trackId) {
+      console.log('[AUDIO TRACK CHANGE]', {
+        previousTrackId: currentTrackIdRef.current,
+        nextTrackId: trackId,
+        position,
+      });
+
       currentTrackIdRef.current = trackId;
       audio.src = `/stream/room/${roomId}/stream?track=${trackId}&t=${Date.now()}`;
       const syncPosition = () => {
         const duration = Number(audio.duration);
         const target = Math.max(0, Math.min(Number(position) || 0, duration > 0 ? duration - 0.25 : Number(position) || 0));
+
+        console.log('[AUDIO METADATA SYNC]', {
+          trackId,
+          duration,
+          target,
+          currentTime: audio.currentTime,
+        });
+
         if (Math.abs(audio.currentTime - target) > 0.25) audio.currentTime = target;
       };
       audio.addEventListener('loadedmetadata', syncPosition, { once: true });
       audio.load();
     }
     if (audio.readyState >= 1 && Math.abs(audio.currentTime - (Number(position) || 0)) > 1.5) {
+      console.log('[AUDIO SEEK]', {
+        trackId,
+        from: audio.currentTime,
+        to: Math.max(0, Number(position) || 0),
+        position,
+      });
+
       audio.currentTime = Math.max(0, Number(position) || 0);
     }
     if (isPlaying) {
-      audio.play().catch(() => showToast('Нажмите Play, чтобы разрешить воспроизведение', 'error'));
+      console.log('[AUDIO PLAY REQUEST]', {
+        trackId,
+        currentTime: audio.currentTime,
+        paused: audio.paused,
+      });
+
+      audio.play().catch((error) => {
+        console.error('[AUDIO PLAY ERROR]', error);
+        showToast('Нажмите Play, чтобы разрешить воспроизведение', 'error');
+      });
     } else {
+      console.log('[AUDIO PAUSE REQUEST]', {
+        trackId,
+        currentTime: audio.currentTime,
+      });
+
       audio.pause();
     }
   }, [currentTrack, isPlaying, position, roomId]);
 
   useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return undefined;
+
+    const logAudioEvent = (event) => {
+      console.log(`[AUDIO EVENT: ${event.type}]`, {
+        time: new Date().toISOString(),
+        trackId: currentTrackIdRef.current,
+        currentTime: audio.currentTime,
+        duration: audio.duration,
+        paused: audio.paused,
+        ended: audio.ended,
+        readyState: audio.readyState,
+        networkState: audio.networkState,
+        src: audio.currentSrc || audio.src,
+      });
+    };
+
+    const events = [
+      'loadstart',
+      'loadedmetadata',
+      'canplay',
+      'playing',
+      'pause',
+      'waiting',
+      'stalled',
+      'seeking',
+      'seeked',
+      'ended',
+      'emptied',
+      'error',
+    ];
+
+    events.forEach((eventName) => {
+      audio.addEventListener(eventName, logAudioEvent);
+    });
+
+    return () => {
+      events.forEach((eventName) => {
+        audio.removeEventListener(eventName, logAudioEvent);
+      });
+    };
+  }, []);
+
+  useEffect(() => {
     if (!isPlaying) return undefined;
     const timer = setInterval(() => {
       const audio = audioRef.current;
+
+      console.log('[AUDIO TIMER]', {
+        time: new Date().toISOString(),
+        trackId: currentTrackIdRef.current,
+        position,
+        currentTime: audio?.currentTime ?? null,
+        paused: audio?.paused ?? null,
+        readyState: audio?.readyState ?? null,
+        isPlaying,
+      });
+
       if (audio && !audio.paused) setPosition(audio.currentTime);
       else setPosition((value) => value + 1);
     }, 1000);
