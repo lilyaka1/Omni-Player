@@ -8,6 +8,7 @@ import { showToast } from '../utils/toast';
 
 // Импорт компонентов
 import PlayerControls from '../components/PlayerControls';
+import LyricsPanel from '../components/LyricsPanel';
 import EditTrackModal from '../components/EditTrackModal';
 import Sidebar from '../components/Sidebar';
 
@@ -622,6 +623,12 @@ export default function LibraryPage() {
             onVolumeChange={handleVolumeChange}
             onToggleShuffle={handleShuffleToggle}
             onToggleRepeat={handleRepeatToggle}
+          />
+
+          <LyricsPanel
+            track={currentTrack}
+            currentTime={currentTime}
+            onSeek={seekTo}
           />
 
           <input id="localFileInput" type="file" accept="audio/*" multiple style={{ display: 'none' }} onChange={uploadFiles} />
