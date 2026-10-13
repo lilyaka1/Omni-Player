@@ -3,6 +3,9 @@
 # Thumbnails
 Thumbs.db
 
+# Node.js dependencies
+/frontend/node_modules/
+
 # Python
 __pycache__/
 *.py[cod]

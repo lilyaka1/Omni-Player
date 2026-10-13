@@ -8,6 +8,7 @@ import LivePage from './pages/LivePage';
 import ProfilePage from './pages/ProfilePage';
 import RoomPage from './pages/RoomPage';
 import LoginPage from './pages/LoginPage';
+import KaraokePage from './pages/KaraokePage';
 
 export default function App() {
   useEffect(() => {
@@ -27,6 +28,7 @@ export default function App() {
       <Route path="/login.html" element={<LoginPage />} />
       <Route path="/player" element={<LibraryPage />} />
       <Route path="/player.html" element={<LibraryPage />} />
+      <Route path="/karaoke" element={<KaraokePage />} />
       <Route path="/live" element={<LivePage />} />
       <Route path="/live.html" element={<LivePage />} />
       <Route path="/profile" element={<ProfilePage />} />

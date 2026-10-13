@@ -73,6 +73,7 @@ export default function Sidebar({ activePage, onPageChange }) {
     genres: '/',
     profile: '/profile',
     player: '/player',
+    karaoke: '/karaoke',
     live: '/live',
     room: '/room',
   }), []);
@@ -81,7 +82,7 @@ export default function Sidebar({ activePage, onPageChange }) {
     setSidebarOpen(false);
     const href = navMap[page] || '/';
     // Pages that have their own route should always navigate via href
-    const externalPages = ['player', 'live', 'room', 'profile'];
+    const externalPages = ['player', 'karaoke', 'live', 'room', 'profile'];
     if (externalPages.includes(page)) {
       if (window.location.pathname !== href) {
         window.location.href = href;
@@ -127,6 +128,9 @@ export default function Sidebar({ activePage, onPageChange }) {
           </button>
           <button className={`nav-item ${activePage === 'player' ? 'active' : ''}`} onClick={() => handleNav('player')}>
             <i className="fa-solid fa-bookmark" /> Моя медиотека
+          </button>
+          <button className={`nav-item ${activePage === 'karaoke' ? 'active' : ''}`} onClick={() => handleNav('karaoke')}>
+            <i className="fa-solid fa-microphone-lines" /> Караоке
           </button>
 
           {!!myRooms.length && (
