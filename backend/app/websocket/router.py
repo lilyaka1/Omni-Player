@@ -47,13 +47,13 @@ async def websocket_endpoint(
                 await handle_track_change(websocket, room_id, user, data)
             elif msg_type == "playback_control":
                 logger.info(f"WS [{room_id}] playback_control data={json.dumps(data, default=str)}")
-                await handle_playback_control(room_id, user, data)
+                await handle_playback_control(websocket, room_id, user, data)
             elif msg_type == "playback_ended":
                 logger.info(f"WS [{room_id}] playback_ended data={json.dumps(data, default=str)}")
                 await handle_playback_ended(room_id, user, data)
             elif msg_type == "reorder_queue":
                 from app.websocket.handlers import handle_reorder_queue
-                await handle_reorder_queue(room_id, user, data)
+                await handle_reorder_queue(websocket, room_id, user, data)
     except WebSocketDisconnect:
         manager.disconnect(room_id, websocket)
         room_state = manager.get_room_state(room_id)

@@ -26,7 +26,7 @@ from typing import Dict, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from app.database.session import SessionLocal
-from app.database.models import Room, RoomTrack
+from app.database.models import Room, RoomTrack, PlaybackSession
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -226,7 +226,7 @@ class RoomTimelineManager:
         Восстановить timeline state из DB.
 
         Используется при старте приложения или reconnect.
-        Восстанавливает позицию из Room.playback_position.
+        Восстанавливает позицию из PlaybackSession.playback_position.
         
         IMPORTANT: При восстановлении после F5/рестарта ВСЕГДА используем
         current time как started_at, потому что accumulated_offset уже содержит
@@ -245,8 +245,11 @@ class RoomTimelineManager:
             if not track:
                 return None
 
-            # Восстанавливаем позицию из БД
-            saved_position = room.playback_position or 0.0
+            # Восстанавливаем позицию текущего PlaybackSession из БД.
+            session = db.query(PlaybackSession).filter(
+                PlaybackSession.room_id == room_id
+            ).first()
+            saved_position = session.playback_position if session else 0.0
             
             # ALWAYS use current time as started_at when restoring from DB.
             # The accumulated_offset contains the saved position, so:
@@ -259,7 +262,10 @@ class RoomTimelineManager:
                 accumulated_offset=saved_position,
                 is_playing=room.is_playing,
             )
-
+            # Keep the recovered clock in memory. Otherwise the next caller
+            # creates a fresh timeline and starts the track from zero again.
+            with self._lock:
+                self._states[room_id] = state
             return state
         finally:
             db.close()
@@ -279,23 +285,12 @@ class RoomTimelineManager:
         try:
             from app.playback.controller import update_playback_session
             from app.database.session import SessionLocal
-            from app.database.models import Room
             
             # Получаем текущую позицию
             now = time.time()
             position = state.get_position(now)
             
-            # Сохраняем позицию в Room.playback_position
-            db = SessionLocal()
-            try:
-                room = db.query(Room).filter(Room.id == room_id).first()
-                if room:
-                    room.playback_position = position
-                    db.commit()
-            finally:
-                db.close()
-            
-            # Также обновляем playback session
+            # PlaybackSession is the persisted playback authority.
             ok = update_playback_session(
                 room_id, 
                 'playing' if state.is_playing else 'stopped',

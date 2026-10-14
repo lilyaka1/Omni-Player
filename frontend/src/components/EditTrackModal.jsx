@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 export default function EditTrackModal({
   track,
   isOpen,
@@ -93,7 +94,7 @@ export default function EditTrackModal({
         >
           {track.thumbnail ? (
             <img
-              src={track.thumbnail}
+              src={getImageUrl(track.thumbnail)}
               alt=""
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
             />

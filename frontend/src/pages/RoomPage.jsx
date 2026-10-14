@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import RoomLobby from '../components/RoomLobby';
 import Equalizer from '../components/Equalizer';
@@ -48,6 +49,7 @@ export default function RoomPage() {
   const wsRef = useRef(null);
   const audioRef = useRef(null);
   const currentTrackIdRef = useRef(null);
+  const playbackRateResetRef = useRef(null);
 
   const canControl = role === 'owner' || role === 'admin';
   const authHeaders = { Authorization: `Bearer ${token}` };
@@ -70,8 +72,15 @@ export default function RoomPage() {
   function applySnapshot(snapshot) {
     const data = snapshot?.data || snapshot || {};
     if (Array.isArray(data.queue)) setQueue(data.queue.map(normalizeTrack));
-    if (data.current_track !== undefined) setCurrentTrack(data.current_track ? normalizeTrack(data.current_track) : null);
+    // `room_state` uses current_track while server playback broadcasts use track.
+    // Accept both so every client switches its audio source on server-side advance.
+    const nextTrack = data.current_track !== undefined ? data.current_track : data.track;
+    if (nextTrack !== undefined) {
+      setCurrentTrack(nextTrack ? normalizeTrack(nextTrack) : null);
+      if (nextTrack && Number(nextTrack.id) !== currentTrackIdRef.current) setPosition(0);
+    }
     if (typeof data.is_playing === 'boolean') setIsPlaying(data.is_playing);
+    else if (data.playback_state) setIsPlaying(data.playback_state === 'playing');
     if (data.position !== undefined) setPosition(Number(data.position) || 0);
     if (data.user_role) {
       const nextRole = String(data.user_role).toLowerCase();
@@ -113,6 +122,17 @@ export default function RoomPage() {
 
         if (message.type === 'room_state' || message.type === 'track_change' || message.type === 'track_changed') {
           applySnapshot(data);
+        }
+        if (message.type === 'track_sync') {
+          const trackId = Number(data.track_id);
+          const serverTime = Date.parse(data.server_time || '');
+          const networkElapsed = Number.isFinite(serverTime) ? Math.max(0, (Date.now() - serverTime) / 1000) : 0;
+          const targetPosition = Number(data.position) + (data.is_playing ? networkElapsed : 0);
+
+          if (!trackId || trackId === currentTrackIdRef.current) {
+            setPosition(targetPosition);
+            setIsPlaying(Boolean(data.is_playing));
+          }
         }
         if (message.type === 'queue_updated' || message.type === 'queue_reordered') {
           if (Array.isArray(data.queue)) setQueue(data.queue.map(normalizeTrack));
@@ -177,17 +197,31 @@ export default function RoomPage() {
       audio.addEventListener('loadedmetadata', syncPosition, { once: true });
       audio.load();
     }
-    if (audio.readyState >= 1 && Math.abs(audio.currentTime - (Number(position) || 0)) > 1.5) {
+    const duration = Number(audio.duration);
+    const targetPosition = Math.max(
+      0,
+      Math.min(Number(position) || 0, duration > 0 ? duration - 0.25 : Number(position) || 0),
+    );
+    const drift = targetPosition - audio.currentTime;
+    const atTrackEnd = duration > 0 && targetPosition >= duration - 0.25;
+    if (audio.readyState >= 1 && Math.abs(drift) > 0.75) {
       console.log('[AUDIO SEEK]', {
         trackId,
         from: audio.currentTime,
-        to: Math.max(0, Number(position) || 0),
+        to: targetPosition,
         position,
       });
 
-      audio.currentTime = Math.max(0, Number(position) || 0);
+      audio.currentTime = targetPosition;
+    } else if (audio.readyState >= 1 && isPlaying && Math.abs(drift) > 0.08) {
+      // Small drift is corrected without an audible seek.
+      audio.playbackRate = drift > 0 ? 1.03 : 0.97;
+      if (playbackRateResetRef.current) window.clearTimeout(playbackRateResetRef.current);
+      playbackRateResetRef.current = window.setTimeout(() => {
+        audio.playbackRate = 1;
+      }, 2000);
     }
-    if (isPlaying) {
+    if (isPlaying && !atTrackEnd && !audio.ended) {
       console.log('[AUDIO PLAY REQUEST]', {
         trackId,
         currentTime: audio.currentTime,
@@ -205,12 +239,24 @@ export default function RoomPage() {
       });
 
       audio.pause();
+      audio.playbackRate = 1;
     }
   }, [currentTrack, isPlaying, position, roomId]);
 
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return undefined;
+
+    const reportEnded = () => {
+      // This is only a fast-path hint. The backend validates its own expected end
+      // time before advancing, so a listener cannot force a premature track change.
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'playback_ended',
+          track_id: currentTrackIdRef.current,
+        }));
+      }
+    };
 
     const logAudioEvent = (event) => {
       console.log(`[AUDIO EVENT: ${event.type}]`, {
@@ -244,11 +290,13 @@ export default function RoomPage() {
     events.forEach((eventName) => {
       audio.addEventListener(eventName, logAudioEvent);
     });
+    audio.addEventListener('ended', reportEnded);
 
     return () => {
       events.forEach((eventName) => {
         audio.removeEventListener(eventName, logAudioEvent);
       });
+      audio.removeEventListener('ended', reportEnded);
     };
   }, []);
 
@@ -268,7 +316,6 @@ export default function RoomPage() {
       });
 
       if (audio && !audio.paused) setPosition(audio.currentTime);
-      else setPosition((value) => value + 1);
     }, 1000);
     return () => clearInterval(timer);
   }, [isPlaying]);
@@ -347,7 +394,7 @@ export default function RoomPage() {
           <section className="glass glass-primary player-card">
             <div className={`artwork-container ${isPlaying ? 'spinning' : ''}`}>
               <div className="artwork-img">
-                {currentTrack?.thumbnail ? <img src={currentTrack.thumbnail} alt="" /> : <div className="artwork-placeholder-icon"><i className="fa-solid fa-music" /></div>}
+                {currentTrack?.thumbnail ? <img src={getImageUrl(currentTrack.thumbnail)} alt="" /> : <div className="artwork-placeholder-icon"><i className="fa-solid fa-music" /></div>}
               </div>
             </div>
             <div className="track-info">
@@ -372,7 +419,7 @@ export default function RoomPage() {
               {[-2, -1, 0, 1, 2].map((offset) => {
                 const index = queue.findIndex((track) => track.id === currentTrack?.id) + offset;
                 const track = queue[index];
-                return <div className={`cf-cover ${track ? '' : 'cf-cover-empty'}`} data-pos={offset} key={offset}><div className="cf-cover-img">{track?.thumbnail ? <img src={track.thumbnail} alt="" /> : <i className="fa-solid fa-music" />}</div></div>;
+                return <div className={`cf-cover ${track ? '' : 'cf-cover-empty'}`} data-pos={offset} key={offset}><div className="cf-cover-img">{track?.thumbnail ? <img src={getImageUrl(track.thumbnail)} alt="" /> : <i className="fa-solid fa-music" />}</div></div>;
               })}
             </div></div>
             <div className="cf-info"><div className="cf-title">{currentTrack?.title || 'Нет треков в очереди'}</div><div className="cf-artist">{currentTrack?.artist || 'Добавьте треки'}</div></div>
@@ -386,7 +433,7 @@ export default function RoomPage() {
               {!queue.length && <div className="empty-state"><i className="fa-solid fa-music" /><p>Очередь пуста</p></div>}
               {queue.map((track) => (
                 <div className={`queue-item ${currentTrack?.id === track.id ? 'active' : ''}`} key={track.id} onClick={() => canControl && send('track_change', { track_id: track.id })}>
-                  <div className="queue-thumb">{track.thumbnail ? <img src={track.thumbnail} alt="" /> : <i className="fa-solid fa-music" />}</div>
+                  <div className="queue-thumb">{track.thumbnail ? <img src={getImageUrl(track.thumbnail)} alt="" /> : <i className="fa-solid fa-music" />}</div>
                   <div className="queue-item-info"><div className="queue-item-title">{track.title || 'Без названия'}</div><div className="queue-item-dur">{formatTime(track.duration)}</div></div>
                   {canControl && <button className="queue-item-del" onClick={(event) => { event.stopPropagation(); removeTrack(track.id); }}><i className="fa-solid fa-xmark" /></button>}
                 </div>

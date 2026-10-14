@@ -33,10 +33,10 @@ def get_room_state(db, room) -> dict:
             timeline_state = None
 
     if timeline_state and track:
-        elapsed = min(timeline_state.get_position(), track.duration or 0)
+        elapsed = max(0.0, min(timeline_state.get_position(), track.duration or 0))
     elif getattr(room, 'playback_started_at', None) and track:
         elapsed = (datetime.utcnow() - room.playback_started_at).total_seconds()
-        elapsed = min(elapsed, track.duration or 0)
+        elapsed = max(0.0, min(elapsed, track.duration or 0))
 
     # Build queue snapshot
     queue_rows = (

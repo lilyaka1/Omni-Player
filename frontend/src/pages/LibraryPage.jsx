@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import { useEffect, useMemo, useState } from 'react';
 import { clearToken, getToken } from '../utils/auth';
 import { formatTime } from '../utils/format';
@@ -652,7 +653,7 @@ export default function LibraryPage() {
                 return (
                   <div key={`${t.title}-${index}`} className="search-result-card glass glass-secondary">
                     <div className="search-result-thumb">
-                      {t.thumbnail ? <img src={t.thumbnail} alt="" loading="lazy" /> : <i className="fa-solid fa-music" style={{ fontSize: '2rem', color: 'var(--accent)', opacity: 0.4 }} />}
+                      {t.thumbnail ? <img src={getImageUrl(t.thumbnail)} alt="" loading="lazy" /> : <i className="fa-solid fa-music" style={{ fontSize: '2rem', color: 'var(--accent)', opacity: 0.4 }} />}
                     </div>
                     <div className="search-result-info">
                       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -706,7 +707,7 @@ export default function LibraryPage() {
                 {libraryTracks.map((track) => (
                   <div className={`track-item player-queue-item ${currentTrack?.id === track.id ? 'active' : ''}`} key={track.id}>
                     <div className="track-thumb">
-                      {track.thumbnail ? <img src={track.thumbnail} alt="" loading="lazy" /> : <i className="fa-solid fa-music" />}
+                      {track.thumbnail ? <img src={getImageUrl(track.thumbnail)} alt="" loading="lazy" /> : <i className="fa-solid fa-music" />}
                     </div>
                     <div className="track-item-body">
                       <div className="track-item-title">{track.title || 'Без названия'}</div>
@@ -759,7 +760,7 @@ export default function LibraryPage() {
                 {queueTracks.map((track, index) => (
                   <div className={`track-item player-queue-item ${currentTrack?.id === track.id ? 'active' : ''}`} key={track.id}>
                     <div className="track-thumb">
-                      {track.thumbnail ? <img src={track.thumbnail} alt="" loading="lazy" /> : <i className="fa-solid fa-music" />}
+                      {track.thumbnail ? <img src={getImageUrl(track.thumbnail)} alt="" loading="lazy" /> : <i className="fa-solid fa-music" />}
                     </div>
                     <div className="track-item-body">
                       <div className="track-item-title">{track.title || 'Без названия'}</div>

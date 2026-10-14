@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { authFetch, clearToken, getToken } from '../utils/auth';
 import { showToast } from '../utils/toast';
@@ -318,7 +319,7 @@ export default function ProfilePage() {
               {likes.map((t) => (
                 <div className="track-item" key={t.id}>
                   <div className="track-thumb">
-                    {t.thumbnail_url ? <img src={t.thumbnail_url} alt="" loading="lazy" /> : <i className="fa-solid fa-music" />}
+                    {t.thumbnail_url ? <img src={getImageUrl(t.thumbnail_url)} alt="" loading="lazy" /> : <i className="fa-solid fa-music" />}
                   </div>
                   <div className="track-item-body">
                     <div className="track-item-title">{t.title || 'Без названия'}</div>
@@ -342,7 +343,7 @@ export default function ProfilePage() {
                 <div key={p.id} className="glass glass-tertiary" style={{ padding: 12, borderRadius: 12 }}>
                   <div style={{ width: '100%', aspectRatio: '1/1', borderRadius: 10, overflow: 'hidden', background: 'rgba(255,255,255,0.04)', marginBottom: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                     {p.thumbnail
-                      ? <img src={p.thumbnail} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      ? <img src={getImageUrl(p.thumbnail)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                       : <i className="fa-solid fa-list-music" style={{ fontSize: '1.6rem', opacity: 0.6 }} />}
                   </div>
                   <div style={{ fontWeight: 600, fontSize: '0.92rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

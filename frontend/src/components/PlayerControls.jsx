@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import { formatTime } from '../utils/format';
 import TrackStatus from './TrackStatus';
 import useTrackStatus from '../hooks/useTrackStatus';
@@ -31,7 +32,7 @@ export default function PlayerControls({
     <section className="player-hero glass glass-secondary">
       <div className="player-hero-cover">
         {currentTrack?.thumbnail
-          ? <img src={currentTrack.thumbnail} alt="" loading="lazy" />
+          ? <img src={getImageUrl(currentTrack.thumbnail)} alt="" loading="lazy" />
           : <div className="player-hero-cover-placeholder"><i className="fa-solid fa-music" /></div>}
       </div>
 

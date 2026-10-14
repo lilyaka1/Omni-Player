@@ -718,6 +718,9 @@ def get_room(room_id: int, db: Session = Depends(get_db)):
             detail="Room not found"
         )
     
+    from app.websocket.manager import manager
+
+    listener_count = len(manager.active_connections.get(room_id, []))
     room_users = room_service.get_room_users(room_id)
     users = [
         RoomUserResponse(
@@ -738,7 +741,8 @@ def get_room(room_id: int, db: Session = Depends(get_db)):
         owner_id=getattr(room, "creator_id", None),
         is_active=bool(getattr(room, "is_active", True)),
         max_users=getattr(room, "max_users", None) or 50,
-        current_users=len(users),
+        current_users=listener_count,
+        listener_count=listener_count,
         created_at=room.created_at,
         updated_at=room.updated_at,
         users=users,

@@ -126,6 +126,8 @@ def update_playback_session(room_id: int, new_state: str, current_queue_item_id:
                 sess = PlaybackSession(room_id=room_id, current_queue_item_id=current_queue_item_id, playback_state=new_state)
                 if expected_end_at:
                     sess.expected_end_at = expected_end_at
+                if playback_position is not None:
+                    sess.playback_position = playback_position
                 db.add(sess)
                 db.commit()
                 db.refresh(sess)
@@ -160,9 +162,8 @@ def update_playback_session(room_id: int, new_state: str, current_queue_item_id:
                 db.rollback()
                 return None
 
-            # Also update Room.playback_position if provided
             if playback_position is not None:
-                db.query(Room).filter(Room.id == room_id).update({Room.playback_position: playback_position})
+                update_values[PlaybackSession.playback_position] = playback_position
 
             db.commit()
             sess = db.query(PlaybackSession).filter(PlaybackSession.room_id == room_id).first()
@@ -398,7 +399,7 @@ def start_playback(room_id: int) -> Optional[int]:
                 expected_end = None
 
             try:
-                update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end, force=True)
+                update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end, force=True, playback_position=0.0)
             except Exception:
                 pass
 
@@ -468,7 +469,7 @@ def next_track(room_id: int) -> Optional[int]:
                     expected_end = None
 
                 try:
-                    update_playback_session(room_id, 'playing', current_queue_item_id=next_row.id, expected_end_at=expected_end)
+                    update_playback_session(room_id, 'playing', current_queue_item_id=next_row.id, expected_end_at=expected_end, playback_position=0.0)
                 except Exception:
                     pass
 
@@ -498,7 +499,7 @@ def next_track(room_id: int) -> Optional[int]:
                         except Exception:
                             expected_end = None
                         try:
-                            update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end)
+                            update_playback_session(room_id, 'playing', current_queue_item_id=first.id, expected_end_at=expected_end, playback_position=0.0)
                         except Exception:
                             pass
                         on_playback_event(room_id, "next", {"track_id": first.id})
@@ -789,6 +790,7 @@ def playback_tick(room_id: int, recovery_timeout_seconds: int = 10, max_retries:
                     current_queue_item_id=first.id,
                     playback_state='playing',
                     expected_end_at=expected_end,
+                    playback_position=0.0,
                     generation=1,
                 )
                 db.add(sess)
@@ -933,6 +935,7 @@ def _inner_advance(db, room, room_id: int, sess: PlaybackSession) -> None:
         sess.current_queue_item_id = first.id
         sess.playback_state = 'playing'
         sess.expected_end_at = expected_end
+        sess.playback_position = 0.0
         sess.generation = (sess.generation or 0) + 1
         sess.updated_at = datetime.utcnow()
         db.commit()
@@ -969,6 +972,7 @@ def _inner_advance(db, room, room_id: int, sess: PlaybackSession) -> None:
             sess.current_queue_item_id = first.id
             sess.playback_state = 'playing'
             sess.expected_end_at = expected_end
+            sess.playback_position = 0.0
             sess.generation = (sess.generation or 0) + 1
             sess.updated_at = datetime.utcnow()
             db.commit()

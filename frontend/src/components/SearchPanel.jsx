@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import React from 'react';
 
 const SearchPanel = ({
@@ -64,7 +65,7 @@ const SearchPanel = ({
             <div key={result.id} className="search-result-item">
               <div className="search-result-thumbnail">
                 {result.thumbnail ? (
-                  <img src={result.thumbnail} alt={result.title} />
+                  <img src={getImageUrl(result.thumbnail)} alt={result.title} />
                 ) : (
                   <div className="search-result-thumbnail-placeholder">
                     <span>🎵</span>

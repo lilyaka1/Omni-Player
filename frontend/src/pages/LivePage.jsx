@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { clearToken, getToken } from '../utils/auth';
 import { createRoomWebSocket } from '../utils/roomWebSocket';
@@ -301,6 +302,10 @@ export default function LivePage() {
         onRoomState(payload);
       }
 
+      if (msg.type === 'error') {
+        showToast(payload.message || payload.reason || 'Команда не выполнена', 'error');
+      }
+
       if (msg.type === 'chat') {
         setChatMessages((prev) => [...prev, { user: payload.user || '?', content: payload.content || '' }]);
       }
@@ -323,8 +328,10 @@ export default function LivePage() {
               : Date.now()
           );
           setDurationSec(Number(track.duration) || 0);
-          setBroadcastLive(true);
-          setStatusText('Статус: активно');
+          if (typeof payload.is_playing === 'boolean') {
+            setBroadcastLive(payload.is_playing);
+            setStatusText(payload.is_playing ? 'Статус: активно' : 'Статус: не активно');
+          }
           // Не удаляем текущий трек — очередь показывает все треки, nowPlayingId выделяет играющий
         } else {
           setNowPlaying(null);
@@ -346,6 +353,10 @@ export default function LivePage() {
             : Date.now()
         );
         setDurationSec(Number(payload.current_track.duration) || 0);
+        if (typeof payload.is_playing === 'boolean') {
+          setBroadcastLive(payload.is_playing);
+          setStatusText(payload.is_playing ? 'Статус: активно' : 'Статус: не активно');
+        }
         // Не удаляем текущий трек — очередь показывает все треки, nowPlayingId выделяет играющий
       }
 
@@ -384,22 +395,12 @@ export default function LivePage() {
       alert('Подключитесь к комнате');
       return false;
     }
-    ws.send(JSON.stringify(payload));
-    return true;
+    return ws.send(payload);
   }
 
   function selectTrack(trackId) {
     const ok = wsSend({ type: 'playback_control', action: 'play', track_id: trackId });
     if (!ok) return;
-    setNowPlayingId(trackId);
-    const localTrack = queue.find((t) => t.id === trackId);
-    if (localTrack) {
-      setNowPlaying(localTrack);
-      setStartedAtMs(Date.now());
-      setDurationSec(Number(localTrack.duration) || 0);
-    }
-    setBroadcastLive(true);
-    setStatusText('Статус: активно');
   }
 
   async function deleteTrack(trackId) {
@@ -462,14 +463,10 @@ export default function LivePage() {
     }
 
     wsSend({ type: 'playback_control', action: 'play', track_id: nowPlayingId });
-    setBroadcastLive(true);
-    setStatusText('Статус: активно');
   }
 
   function doPause() {
     wsSend({ type: 'playback_control', action: 'pause' });
-    setBroadcastLive(false);
-    setStatusText('Статус: не активно');
   }
 
   async function doStartStream() {
@@ -561,17 +558,11 @@ export default function LivePage() {
     const next = [...queue];
     const [moved] = next.splice(srcIdx, 1);
     next.splice(dstIdx, 0, moved);
-    setQueue(next);
 
-    // Reorder через WebSocket вместо HTTP PUT (который может не поддерживаться)
-    try {
-      wsSend({
-        type: 'reorder_queue',
-        order: next.map((t) => t.id),
-      });
-    } catch {
-      // noop
-    }
+    wsSend({
+      type: 'reorder_queue',
+      order: next.map((t) => t.id),
+    });
   }
 
   function doLogout() {
@@ -703,7 +694,7 @@ export default function LivePage() {
                     onDrop={() => onDrop(t.id)}
                   >
                     <span className="drag">☰</span>
-                    {t.thumbnail ? <img src={t.thumbnail} alt="" /> : <div className="ph">🎵</div>}
+                    {t.thumbnail ? <img className="cover" src={getImageUrl(t.thumbnail)} alt="" /> : <div className="cover ph">🎵</div>}
                     <div className="meta">
                       <div className="title">{t.title}</div>
                       <div className="artist">{t.artist || '-'}</div>
@@ -718,7 +709,7 @@ export default function LivePage() {
 
           <section className="live-admin-right">
             <div className="live-admin-now glass glass-secondary">
-              {nowPlaying?.thumbnail ? <img className="cover" src={nowPlaying.thumbnail} alt="" /> : <div className="cover ph">🎵</div>}
+              {nowPlaying?.thumbnail ? <img className="cover" src={getImageUrl(nowPlaying.thumbnail)} alt="" /> : <div className="cover ph">🎵</div>}
               <div className="np-meta">
                 <div className="np-title">{nowPlaying?.title || 'Ничего не играет'}</div>
                 <div className="np-artist">{nowPlaying?.artist || '-'}</div>

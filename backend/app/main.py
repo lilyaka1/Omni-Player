@@ -29,7 +29,32 @@ static_dir.mkdir(parents=True, exist_ok=True)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 Starting Omni Player API")
+    from app.playback.sync import sync_service
+
+    sync_service.start()
+    # Restore automatic advancement for rooms that already had queued tracks when
+    # the API restarted. Playback must not depend on an admin browser reconnecting.
+    try:
+        from app.database.models import RoomTrack
+        from app.database.session import SessionLocal
+        from app.playback.loop import playback_loop
+
+        db = SessionLocal()
+        try:
+            room_ids = [row[0] for row in db.query(RoomTrack.room_id).distinct().all()]
+        finally:
+            db.close()
+        for room_id in room_ids:
+            playback_loop.register_room(room_id)
+    except Exception:
+        logger.exception("Unable to restore room playback loops")
     yield
+    sync_service.stop()
+    try:
+        from app.playback.loop import playback_loop
+        playback_loop.shutdown()
+    except Exception:
+        logger.exception("Unable to stop room playback loops")
     logger.info("🛑 Shutting down Omni Player API")
 
 
@@ -80,6 +105,7 @@ _register("WebSocket", "app.websocket.router")
 
 # 🔥 ВАЖНО — ЭТО ДОЛЖНО БЫТЬ
 _register("Stream", "app.stream.router")
+_register("Media", "app.media.image_proxy")
 
 
 # -----------------------------

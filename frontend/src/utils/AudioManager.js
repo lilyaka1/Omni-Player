@@ -1,3 +1,4 @@
+import { getImageUrl } from './image';
 /**
  * AudioManager - Singleton для управления воспроизведением
  * Обеспечивает стабильный audio element без remount
@@ -106,7 +107,7 @@ class AudioManager {
       artist: this.currentTrack.artist || 'Unknown Artist',
       album: this.currentTrack.album || '',
       artwork: this.currentTrack.thumbnail
-        ? [{ src: this.currentTrack.thumbnail, sizes: '512x512', type: 'image/jpeg' }]
+        ? [{ src: getImageUrl(this.currentTrack.thumbnail), sizes: '512x512', type: 'image/jpeg' }]
         : [],
     });
 

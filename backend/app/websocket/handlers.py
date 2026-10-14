@@ -9,7 +9,7 @@ import json
 import time
 from fastapi import WebSocket, status
 
-from app.database.models import Room, RoomTrack, User, Message, SourceEnum, RoomRoleEnum, user_room_association, Track
+from app.database.models import Room, RoomTrack, PlaybackSession, User, Message, SourceEnum, UserRole, RoomRoleEnum, user_room_association, Track
 from app.database.session import SessionLocal
 from app.websocket.manager import manager
 from app.domains.auth.service import decode_token
@@ -62,7 +62,7 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                 return {"error": "user_blocked"}
 
             user_role = RoomRoleEnum.USER
-            if room.creator_id == user.id:
+            if user.role == UserRole.ADMIN.value or room.creator_id == user.id:
                 user_role = RoomRoleEnum.ADMIN
             else:
                 stmt = user_room_association.select().where(
@@ -160,7 +160,11 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
                 from app.playback.timeline import timeline_manager
                 timeline_state = timeline_manager.get_current_state(room_id)
                 if timeline_state:
-                    position = round(timeline_state.get_position(), 3)
+                    duration = float(now_playing.duration or 0)
+                    position = round(
+                        min(max(0.0, timeline_state.get_position()), duration) if duration > 0 else 0.0,
+                        3,
+                    )
                     is_playing = bool(timeline_state.is_playing)
             except Exception:
                 pass
@@ -204,13 +208,16 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
     await websocket.send_json(payload)
     print(f"📡 [WS] snapshot sent: track={snapshot.get('current_track', {}).get('title') if snapshot.get('current_track') else 'NONE'}, queue_size={len(snapshot.get('queue', []))}")
 
-    # Also send track_change in correct format so player.js handler works
+    # RoomPage loads the audio source when it receives track_change. This is sent
+    # only to the newly connected socket, never broadcast to existing listeners,
+    # so a second browser cannot reset playback in the first one.
     if snapshot.get("current_track"):
         await websocket.send_json(manager._wrap_event("track_change", {
             "current_track": snapshot["current_track"],
             "track": snapshot["current_track"],
+            "is_playing": snapshot.get("is_playing", False),
+            "position": snapshot.get("position", 0.0),
         }))
-        print(f"🎵 [WS] Sent track_change → '{snapshot['current_track']['title']}'")
 
     user_count = len(manager.active_connections.get(room_id, []))
     await manager.broadcast_event(room_id, 'user_count', {"count": user_count})
@@ -261,6 +268,19 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
         def _db_work():
             _db = SessionLocal()
             try:
+                room = _db.query(Room).filter(Room.id == room_id).first()
+                db_user = _db.query(User).filter(User.id == _user_id).first()
+                is_global_admin = db_user and db_user.role == UserRole.ADMIN.value
+                is_room_admin = room and room.creator_id == _user_id
+                if not is_global_admin and not is_room_admin:
+                    membership = _db.execute(user_room_association.select().where(
+                        (user_room_association.c.user_id == _user_id) &
+                        (user_room_association.c.room_id == room_id)
+                    )).first()
+                    is_room_admin = bool(membership and membership.role == RoomRoleEnum.ADMIN)
+                if not room or not (is_global_admin or is_room_admin):
+                    return None
+
                 track = None
                 source_track_id = None
 
@@ -396,45 +416,18 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
 async def handle_playback_ended(room_id: int, user, data: dict) -> None:
     """
     Handle client notification that the current track has ended.
-    SECURITY: Only admins can trigger this; the server controls the queue.
-    The client sends this purely as a signal that the HTML <audio> element ended.
+    The notification is only a hint: the server remains authoritative and advances
+    only when its own expected end time has elapsed.
     """
-    # Check if user is admin/owner before allowing queue advance
-    def _check_admin():
-        _db = SessionLocal()
-        try:
-            room = _db.query(Room).filter(Room.id == room_id).first()
-            if not room:
-                return False
-            if room.creator_id == user.id:
-                return True
-            stmt = user_room_association.select().where(
-                (user_room_association.c.user_id == user.id) &
-                (user_room_association.c.room_id == room_id)
-            )
-            existing = _db.execute(stmt).first()
-            if existing and existing.role == RoomRoleEnum.ADMIN:
-                return True
-            return False
-        finally:
-            _db.close()
-
-    is_admin = await asyncio.to_thread(_check_admin)
-    if not is_admin:
-        print(f"⛔ [ENDED] Room {room_id}: non-admin user {user.id} attempted to advance queue")
-        return
-
-    # Server-side tick will handle advance automatically — this is just a signal
     try:
-        from app.playback.controller import next_track
-        result = await asyncio.to_thread(next_track, room_id)
-        print(f"⏭️ [ENDED] Room {room_id}: next_track result={result}")
+        from app.playback.controller import playback_tick
+        await asyncio.to_thread(playback_tick, room_id)
     except Exception as exc:
-        print(f"❌ [ENDED] Room {room_id}: next error: {exc}")
+        print(f"❌ [ENDED] Room {room_id}: playback tick error: {exc}")
         return
 
 
-async def handle_playback_control(room_id: int, user, data: dict) -> None:
+async def handle_playback_control(websocket: WebSocket, room_id: int, user, data: dict) -> None:
     """MVP radio-mode playback control — только now_playing_track_id в БД.
     Никаких is_playing / is_live / broadcast state.
     SECURITY: Only admin can trigger next/play/pause actions.
@@ -446,6 +439,14 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
     seek_position = data.get("seek_position")  # Optional: seek to position in seconds
     print(f"🎮 [PLAYBACK] MVP radio-mode: room={room_id} action={action} user={user.id} seek_position={seek_position}")
 
+    async def _reply(ok: bool, reason: str = None) -> None:
+        event_type = "command_result" if ok else "error"
+        payload = {"command": "playback_control", "action": action, "ok": ok}
+        if reason:
+            payload["reason"] = reason
+            payload["message"] = reason
+        await websocket.send_json(manager._wrap_event(event_type, payload))
+
     # SECURITY: Only owner/admin can trigger playback control actions
     def _check_admin():
         _db = SessionLocal()
@@ -453,6 +454,9 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
             room = _db.query(Room).filter(Room.id == room_id).first()
             if not room:
                 return False
+            db_user = _db.query(User).filter(User.id == user.id).first()
+            if db_user and db_user.role == UserRole.ADMIN.value:
+                return True
             if room.creator_id == user.id:
                 return True
             stmt = user_room_association.select().where(
@@ -469,6 +473,7 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
     is_admin = await asyncio.to_thread(_check_admin)
     if not is_admin:
         print(f"⛔ [PLAYBACK] Room {room_id}: non-admin user {user.id} blocked from action={action}")
+        await _reply(False, "Недостаточно прав для управления воспроизведением")
         return
 
     def _db_play():
@@ -486,15 +491,26 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
                     from app.playback.controller import set_now_playing
                     if not set_now_playing(room_id, requested_id):
                         return {"ok": False, "reason": "track_not_found"}
-                    return {"ok": True, "now_playing_track_id": requested_id}
-            try:
-                from app.playback.controller import start_playback
-                started_id = start_playback(room_id)
-                if not started_id:
-                    return {"ok": False, "reason": "no_ready_track"}
-                return {"ok": True, "now_playing_track_id": started_id}
-            except Exception:
-                return {"ok": False, "reason": "controller_error"}
+                    room = _db.query(Room).filter(Room.id == room_id).first()
+            from app.playback.controller import start_playback
+            started_id = start_playback(room_id)
+            if not started_id:
+                return {"ok": False, "reason": "no_ready_track"}
+            room = _db.query(Room).filter(Room.id == room_id).first()
+
+            # start_playback() only selects a track in some paths. The room flag
+            # is the persisted playback authority used for a cold reconnect.
+            room.is_playing = True
+            if room.playback_started_at is None:
+                room.playback_started_at = datetime.utcnow()
+            session = _db.query(PlaybackSession).filter(PlaybackSession.room_id == room_id).first()
+            if session:
+                session.playback_state = "playing"
+            _db.commit()
+            return {"ok": True, "now_playing_track_id": room.now_playing_track_id}
+        except Exception:
+            _db.rollback()
+            return {"ok": False, "reason": "controller_error"}
         finally:
             _db.close()
 
@@ -507,6 +523,7 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
             _db.close()
 
     if action == "next":
+        advanced = False
         try:
             # Save current position before advancing
             try:
@@ -515,9 +532,9 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
                 if current_position > 0:
                     db = SessionLocal()
                     try:
-                        room = db.query(Room).filter(Room.id == room_id).first()
-                        if room:
-                            room.playback_position = current_position
+                        session = db.query(PlaybackSession).filter(PlaybackSession.room_id == room_id).first()
+                        if session:
+                            session.playback_position = current_position
                             db.commit()
                     finally:
                         db.close()
@@ -527,8 +544,14 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
             from app.playback.controller import advance_playback
             result = await asyncio.to_thread(advance_playback, room_id)
             print(f"➡️ [PLAYBACK] Room {room_id}: advance_track result={result}")
+            advanced = bool(result)
         except Exception as exc:
             print(f"❌ [PLAYBACK] Room {room_id}: next error: {exc}")
+            await _reply(False, "Не удалось переключить следующий трек")
+            return
+        if not advanced:
+            await _reply(False, "Следующий трек недоступен")
+            return
         # Rebuild FULL state after advance (include queue!)
         room_state = await asyncio.to_thread(_db_state)
         payload = {
@@ -542,14 +565,26 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
         if ct:
             await manager.broadcast_event(room_id, 'track_change', {"current_track": ct, "track": ct})
             print(f"🎵 [PLAYBACK] Broadcast track_change for '{ct.get('title')}'")
+        await _reply(True)
         return
 
     elif action == "play":
         res = await asyncio.to_thread(_db_play)
         if not res["ok"]:
             print(f"❌ [PLAYBACK] Room {room_id}: play failed - {res['reason']}")
+            await _reply(False, res["reason"])
             return
         print(f"✅ [PLAYBACK] MVP: now_playing_track_id={res['now_playing_track_id']}")
+
+        try:
+            from app.playback.timeline import timeline_manager
+            timeline_state = timeline_manager.get_current_state(room_id)
+            if timeline_state is None or timeline_state.track_id != res["now_playing_track_id"]:
+                timeline_manager.start_track(room_id, res["now_playing_track_id"])
+            else:
+                timeline_manager.resume(room_id)
+        except Exception as exc:
+            print(f"⚠️ [PLAYBACK] Room {room_id}: timeline resume failed: {exc}")
 
         # If there's a seek_position, restore timeline with that position
         if seek_position is not None:
@@ -561,9 +596,9 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
                     # Save seeked position to DB
                     db = SessionLocal()
                     try:
-                        room = db.query(Room).filter(Room.id == room_id).first()
-                        if room:
-                            room.playback_position = seek_position
+                        session = db.query(PlaybackSession).filter(PlaybackSession.room_id == room_id).first()
+                        if session:
+                            session.playback_position = seek_position
                             db.commit()
                     finally:
                         db.close()
@@ -581,6 +616,7 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
         await manager.broadcast_event(room_id, 'room_state', payload)
         if ct:
             await manager.broadcast_event(room_id, 'track_change', {"current_track": ct, "track": ct, "is_playing": bool(room_state.get("is_playing", False)), "position": room_state.get("position", 0)})
+        await _reply(True)
         return
 
     elif action == "pause":
@@ -600,8 +636,10 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
                 if not room:
                     return {"ok": False, "reason": "room_not_found"}
                 room.is_playing = False
-                if current_position > 0:
-                    room.playback_position = current_position
+                session = _db.query(PlaybackSession).filter(PlaybackSession.room_id == room_id).first()
+                if session:
+                    session.playback_position = current_position
+                    session.playback_state = "paused"
                 _db.commit()
                 return {"ok": True}
             finally:
@@ -610,6 +648,7 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
         pause_res = await asyncio.to_thread(_db_pause)
         if not pause_res.get("ok"):
             print(f"❌ [PLAYBACK] Room {room_id}: pause failed - {pause_res.get('reason')}")
+            await _reply(False, pause_res.get("reason", "Не удалось поставить на паузу"))
             return
 
         room_state = await asyncio.to_thread(_db_state)
@@ -623,8 +662,10 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
         await manager.broadcast_event(room_id, 'room_state', payload)
         if ct:
             await manager.broadcast_event(room_id, 'track_change', {"current_track": ct, "track": ct, "is_playing": False, "position": room_state.get("position", 0)})
+        await _reply(True)
         return
 
+    await _reply(False, "Неизвестная команда управления воспроизведением")
     room_state = await asyncio.to_thread(_db_state)
     await manager.broadcast_event(room_id, 'room_state', {
         "current_track": room_state.get("current_track"),
@@ -648,7 +689,7 @@ async def handle_playback_control(room_id: int, user, data: dict) -> None:
 
 # -- Reorder queue --
 
-async def handle_reorder_queue(room_id: int, user, data: dict) -> None:
+async def handle_reorder_queue(websocket: WebSocket, room_id: int, user, data: dict) -> None:
     """Обработка reorder_queue: обновление порядка треков в комнате."""
     # ENFORCE: only owner/admin can reorder queue
     def _check_admin():
@@ -657,6 +698,9 @@ async def handle_reorder_queue(room_id: int, user, data: dict) -> None:
             room = _db.query(Room).filter(Room.id == room_id).first()
             if not room:
                 return False
+            db_user = _db.query(User).filter(User.id == user.id).first()
+            if db_user and db_user.role == UserRole.ADMIN.value:
+                return True
             if room.creator_id == user.id:
                 return True
             stmt = user_room_association.select().where(
@@ -673,10 +717,20 @@ async def handle_reorder_queue(room_id: int, user, data: dict) -> None:
     is_admin = await asyncio.to_thread(_check_admin)
     if not is_admin:
         print(f"⛔ [REORDER] Room {room_id}: non-admin user {user.id} blocked")
+        await websocket.send_json(manager._wrap_event("error", {
+            "command": "reorder_queue",
+            "reason": "Недостаточно прав для изменения очереди",
+            "message": "Недостаточно прав для изменения очереди",
+        }))
         return
 
     new_order = data.get("order", [])
     if not isinstance(new_order, list) or not new_order:
+        await websocket.send_json(manager._wrap_event("error", {
+            "command": "reorder_queue",
+            "reason": "Некорректный порядок очереди",
+            "message": "Некорректный порядок очереди",
+        }))
         return
 
     def _db_reorder():
@@ -700,6 +754,11 @@ async def handle_reorder_queue(room_id: int, user, data: dict) -> None:
 
     ok = await asyncio.to_thread(_db_reorder)
     if not ok:
+        await websocket.send_json(manager._wrap_event("error", {
+            "command": "reorder_queue",
+            "reason": "Не удалось изменить порядок очереди",
+            "message": "Не удалось изменить порядок очереди",
+        }))
         return
 
     def _db_queue():
@@ -721,3 +780,7 @@ async def handle_reorder_queue(room_id: int, user, data: dict) -> None:
 
     queue = await asyncio.to_thread(_db_queue)
     await manager.broadcast_event(room_id, 'queue_reordered', {"queue": queue})
+    await websocket.send_json(manager._wrap_event("command_result", {
+        "command": "reorder_queue",
+        "ok": True,
+    }))

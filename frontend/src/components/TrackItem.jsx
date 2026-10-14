@@ -1,3 +1,4 @@
+import { getImageUrl } from '../utils/image';
 import React from 'react';
 import { formatDuration } from '../utils/format';
 import useTrackStatus from '../hooks/useTrackStatus';
@@ -19,7 +20,7 @@ export default function TrackItem({
     <>
       <div className="track-thumbnail">
         {track.thumbnail ? (
-          <img src={track.thumbnail} alt={track.title} />
+          <img src={getImageUrl(track.thumbnail)} alt={track.title} />
         ) : (
           <div className="track-thumbnail-placeholder">
             <span>🎵</span>
