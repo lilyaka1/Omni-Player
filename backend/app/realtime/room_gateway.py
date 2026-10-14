@@ -58,6 +58,9 @@ class RoomGateway:
     def __init__(self, ws_manager=None):
         # WS manager — используем существующий или переданный
         self._ws = ws_manager or _ws_manager
+        # Playback ticks run in worker threads. Keep the websocket loop so
+        # playback hooks can safely schedule broadcasts back onto it.
+        self._event_loop = None
 
         # room_id → set of sent event signatures (для dedup)
         # Ключ: (event_type, entity_id) → последний timestamp
@@ -70,6 +73,10 @@ class RoomGateway:
     # ──────────────────────────────────────────────────────────────────────────
     #  Playback event integration
     # ──────────────────────────────────────────────────────────────────────────
+
+    def bind_event_loop(self):
+        """Remember the application's asyncio loop for worker-thread hooks."""
+        self._event_loop = asyncio.get_running_loop()
 
     def _setup_playback_hooks(self):
         """Подписаться на playback controller events."""
@@ -106,6 +113,7 @@ class RoomGateway:
         """
         if not self._ws:
             return
+        self._event_loop = asyncio.get_running_loop()
 
         msg = {
             "type": "state_snapshot",
@@ -123,6 +131,7 @@ class RoomGateway:
         """
         if not self._ws:
             return
+        self._event_loop = asyncio.get_running_loop()
 
         # Deduplication: не отправляем если уже отправляли тот же track_id
         if self._is_duplicate(room_id, "track_change", track_id):
@@ -312,14 +321,14 @@ class RoomGateway:
 
     def _broadcast_track_change(self, room_id: int, track_id: int):
         """Асинхронный broadcast смены трека (вызывается из hook)."""
-        if not self._ws:
+        if not self._ws or not track_id:
             return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
+        loop = self._event_loop
+        if loop is None or loop.is_closed():
             return
-        if loop.is_running():
-            loop.create_task(self.broadcast_track_change(room_id, track_id))
+        loop.call_soon_threadsafe(
+            lambda: loop.create_task(self.broadcast_track_change(room_id, track_id))
+        )
 
     def _broadcast_playback_ended(self, room_id: int):
         """Сообщить клиентам что playback завершён (очередь пуста)."""

@@ -105,6 +105,17 @@ _ALLOWED_TRANSITIONS = {
     'stopped': ['idle'],
 }
 
+# Состояния элемента очереди. Они описывают загрузку/доступность файла, а не
+# состояние проигрывания PlaybackSession.
+_QUEUE_TRANSITIONS = {
+    'waiting_download': ['ready', 'failed', 'skipped'],
+    'ready': ['waiting_download', 'playing', 'failed', 'skipped', 'played'],
+    'playing': ['ready', 'played', 'failed', 'skipped'],
+    'failed': ['waiting_download', 'ready', 'skipped'],
+    'played': ['ready', 'skipped'],
+    'skipped': ['ready', 'waiting_download'],
+}
+
 
 def update_playback_session(room_id: int, new_state: str, current_queue_item_id: Optional[int] = None, expected_end_at=None, force: bool = False, playback_position: Optional[float] = None) -> Optional[PlaybackSession]:
     """
@@ -180,7 +191,7 @@ def update_queue_state(room_track_id: int, new_state: str) -> bool:
         if not rt:
             return False
         cur = getattr(rt, 'queue_state', 'ready')
-        allowed = _ALLOWED_TRANSITIONS.get(cur, [])
+        allowed = _QUEUE_TRANSITIONS.get(cur, [])
         if new_state == cur:
             return True
         if new_state not in allowed:
@@ -201,19 +212,19 @@ def _select_ready_roomtrack(db, room_id: int, after_order=None, after_id=None, l
     Pick the next playable RoomTrack for the room.
 
     Selection is driven by RoomTrack.queue_state only — NOT by Track/TrackAsset.
-    With on-demand download the next track is fetched lazily when it becomes
-    current, so gating selection on a 'ready' asset would deadlock (a track can
-    never be selected because it was never downloaded, and is never downloaded
-    because it was never selected).
+    A track may become current only after its download has completed and the
+    local file has been validated. Selecting ``waiting_download`` here makes a
+    DRM/preview item replace the current track before the downloader can report
+    its failure and can stall the whole room.
 
-    - normal mode: next item with queue_state in (ready, waiting_download, processing),
-      ordered by order then id; restricted to items after the current one when
-      after_order/after_id is given. Returns None when the queue is exhausted.
+    - normal mode: next item with queue_state ``ready``, ordered by order then
+      id; restricted to items after the current one when after_order/after_id
+      is given. Returns None when the queue is exhausted.
     - loop mode: round-robin by order ignoring queue_state — next by order after
       the current item, wrapping to the first track of the room.
     
-    NOTE: 'processing' state is included so tracks being downloaded are visible
-    and don't disappear from the queue UI.
+    Downloading/failed items remain visible in the queue UI; they are simply not
+    eligible for playback.
     """
     if loop_mode:
         nxt = None
@@ -242,7 +253,7 @@ def _select_ready_roomtrack(db, room_id: int, after_order=None, after_id=None, l
 
     q = db.query(RoomTrack).filter(
         RoomTrack.room_id == room_id,
-        RoomTrack.queue_state.in_(['ready', 'waiting_download', 'processing']),
+        RoomTrack.queue_state == 'ready',
     )
     if after_order is not None:
         q = q.filter(RoomTrack.order > after_order)
@@ -409,7 +420,7 @@ def start_playback(room_id: int) -> Optional[int]:
             db.close()
 
 
-def next_track(room_id: int) -> Optional[int]:
+def next_track(room_id: int, expected_current_id: Optional[int] = None) -> Optional[int]:
     """
     Переключить на следующий трек в очереди.
 
@@ -427,6 +438,12 @@ def next_track(room_id: int) -> Optional[int]:
                 return None
 
             current_id = room.now_playing_track_id
+
+            # A client may report an ``ended`` event after another client already
+            # advanced the room. Check under the room lock so duplicate reports
+            # cannot skip more than one queue item.
+            if expected_current_id is not None and current_id != expected_current_id:
+                return None
 
             if current_id is None:
                 return start_playback(room_id)
@@ -513,14 +530,14 @@ def next_track(room_id: int) -> Optional[int]:
             db.close()
 
 
-def advance_playback(room_id: int) -> Optional[int]:
+def advance_playback(room_id: int, expected_current_id: Optional[int] = None) -> Optional[int]:
     """
     Атомарный advance — то же что next_track, но с явным именем.
 
     Существует для семантической ясности: advance = переход к следующему треку.
     Используй этот метод когда нужно продвинуть воспроизведение вперёд.
     """
-    return next_track(room_id)
+    return next_track(room_id, expected_current_id=expected_current_id)
 
 
 def set_now_playing(room_id: int, track_id: int) -> bool:

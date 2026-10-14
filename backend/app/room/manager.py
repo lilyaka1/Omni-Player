@@ -17,7 +17,7 @@ import time as _t
 from pathlib import Path
 from typing import Dict, Optional
 
-from app.room.ffmpeg import stream_ffmpeg
+from app.room.ffmpeg import stream_ffmpeg, validate_audio_file
 from app.room.queue import advance_track, peek_next_track
 from app.room.room_state import RoomState
 
@@ -38,6 +38,40 @@ def _is_local_file(path: Optional[str]) -> bool:
     if path.startswith(("http://", "https://")):
         return False
     return os.path.isfile(path)
+
+
+def _is_usable_audio_file(path: Optional[str], expected_duration: Optional[float] = None) -> bool:
+    """Return True only for a playable file matching the source duration.
+
+    SoundCloud can expose full-length metadata while the selected CDN format is
+    only a short preview. File size alone cannot detect that case, so validate
+    the actual container and duration before reusing or caching it.
+    """
+    if not _is_local_file(path):
+        return False
+
+    result = validate_audio_file(path, timeout=15)
+    if not result.get("ok"):
+        return False
+
+    actual = result.get("duration")
+    try:
+        expected = float(expected_duration or 0)
+        actual = float(actual or 0)
+    except (TypeError, ValueError):
+        return False
+
+    if actual <= 0:
+        return False
+
+    # A full track reported by metadata must not be replaced by the common
+    # ~30-second SoundCloud preview. Also reject materially truncated files.
+    if expected > 45:
+        tolerance = max(10.0, expected * 0.10)
+        if actual + tolerance < expected:
+            return False
+
+    return True
 
 
 class RoomManager:
@@ -143,6 +177,7 @@ class RoomManager:
                 return {
                     "stream_url": t.stream_url,
                     "thumbnail": t.thumbnail,
+                    "duration": t.duration,
                 }
             finally:
                 db.close()
@@ -150,25 +185,44 @@ class RoomManager:
         existing = await asyncio.to_thread(_read_existing)
         if not existing:
             return None
-        if _is_local_file(existing["stream_url"]):
+        if _is_usable_audio_file(existing["stream_url"], existing.get("duration")):
             return existing["stream_url"]
+        if _is_local_file(existing["stream_url"]):
+            # Do not let a cached preview/broken container make every retry
+            # return the same unusable asset.
+            try:
+                Path(existing["stream_url"]).unlink()
+            except OSError:
+                pass
 
         # Достаём page URL — для SC это `source_track_id` (либо чистый ID,
         # либо webpage URL — `download_to_file` приведёт к нужному виду).
         track_url = source_track_id
 
         self._downloading.add(track_id)
+        await self._set_queue_download_state(track_id, "waiting_download")
         try:
             stem = _file_stem(source, source_track_id)
             target_dir = _DOWNLOADS_DIR
             print(f"⬇️ [prefetch] track {track_id}: downloading → {stem}.mp3")
             t0 = _t.perf_counter()
-            info = await soundcloud_client.download_to_file(
-                track_url, target_dir, stem
+            if str(source).lower() != "soundcloud":
+                await self._set_queue_download_state(
+                    track_id, "failed", "Источник не поддерживается для загрузки"
+                )
+                return None
+
+            # A stuck DRM/HLS request must not keep a room task alive forever.
+            info = await asyncio.wait_for(
+                soundcloud_client.download_to_file(track_url, target_dir, stem),
+                timeout=90,
             )
             elapsed = (_t.perf_counter() - t0) * 1000
             if not info or not info.get("path"):
                 print(f"❌ [prefetch] track {track_id}: download failed (+{elapsed:.0f}ms)")
+                await self._set_queue_download_state(
+                    track_id, "failed", (info or {}).get("error") or "Не удалось скачать аудиофайл"
+                )
                 return None
 
             local_path = info["path"]
@@ -181,7 +235,32 @@ class RoomManager:
                 if not v.get("ok"):
                     print(f"❌ [prefetch] track={track_id}: audio broken after download — {v.get('error')}")
                     # Не сохраняем битый путь
+                    try:
+                        Path(local_path).unlink()
+                    except OSError:
+                        pass
+                    await self._set_queue_download_state(track_id, "failed", "Файл повреждён или имеет неверный формат")
                     return None
+                expected_duration = existing.get("duration")
+                try:
+                    expected_duration = float(expected_duration or 0)
+                    actual_duration = float(v.get("duration") or 0)
+                except (TypeError, ValueError):
+                    expected_duration = 0
+                    actual_duration = 0
+                if expected_duration > 45:
+                    tolerance = max(10.0, expected_duration * 0.10)
+                    if actual_duration <= 0 or actual_duration + tolerance < expected_duration:
+                        print(
+                            f"❌ [prefetch] track={track_id}: downloaded preview/truncated "
+                            f"({actual_duration:.1f}s of expected {expected_duration:.1f}s)"
+                        )
+                        try:
+                            Path(local_path).unlink()
+                        except OSError:
+                            pass
+                        await self._set_queue_download_state(track_id, "failed", "SoundCloud вернул короткое превью вместо полного трека")
+                        return None
                 print(f"✅ [prefetch] track={track_id}: audio valid ({v.get('duration', '?')}s {v.get('codec')})")
             except Exception as ve:
                 print(f"⚠️ [prefetch] track={track_id}: validation error: {ve}")
@@ -215,12 +294,48 @@ class RoomManager:
             print(f"✅ [prefetch] track {track_id} cached locally (+{elapsed:.0f}ms)")
             if saved and saved["thumb"]:
                 await self._broadcast_thumbnail(saved["room_id"], track_id, saved["thumb"])
+            await self._set_queue_download_state(track_id, "ready")
             return local_path
+        except asyncio.TimeoutError:
+            print(f"❌ [prefetch] track {track_id}: download timeout")
+            await self._set_queue_download_state(track_id, "failed", "Загрузка превысила лимит времени")
+            return None
         except Exception as e:
             print(f"❌ [prefetch] track {track_id} error: {e}")
+            await self._set_queue_download_state(track_id, "failed", "Ошибка загрузки трека")
             return None
         finally:
             self._downloading.discard(track_id)
+
+    async def _set_queue_download_state(self, track_id: int, state: str, error: str = ""):
+        """Persist and broadcast the download state of a room queue item."""
+        from app.database.session import SessionLocal
+        from app.database.models import RoomTrack
+
+        def _update():
+            db = SessionLocal()
+            try:
+                track = db.query(RoomTrack).filter(RoomTrack.id == track_id).first()
+                if not track:
+                    return None
+                track.queue_state = state
+                room_id = track.room_id
+                db.commit()
+                return room_id
+            finally:
+                db.close()
+
+        room_id = await asyncio.to_thread(_update)
+        if room_id:
+            try:
+                from app.websocket.manager import manager
+                await manager.broadcast_event(room_id, "queue_item_updated", {
+                    "track_id": track_id,
+                    "queue_state": state,
+                    "error": error,
+                })
+            except Exception:
+                pass
 
     async def prefetch_room_files(
         self, room_id: int, db_session_factory, soundcloud_client

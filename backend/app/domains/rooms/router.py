@@ -335,10 +335,16 @@ async def add_room_track(
                 except Exception:
                     pass
         else:
-            # Legacy/unknown tracks: assume ready to avoid blocking
+            # External tracks are not playable until prefetch has produced and
+            # validated a local asset.  Marking an unknown URL as ready lets a
+            # DRM/preview track become the room's current track and stalls the
+            # whole room before the downloader can report the error.
             try:
                 from app.playback.controller import update_queue_state
-                update_queue_state(track.id, 'ready')
+                update_queue_state(
+                    track.id,
+                    'ready' if track.source in (SourceEnum.LOCAL, "local") else 'waiting_download',
+                )
             except Exception:
                 pass
         db.commit()
@@ -388,6 +394,26 @@ async def add_room_track(
     except Exception as e:
         print(f"⚠️ [router] broadcast_queue_update after add failed: {e}")
 
+    # Начинаем загрузку сразу после добавления, а не только при старте
+    # воспроизведения. Состояние элемента уже waiting_download, поэтому UI
+    # может честно показать прогресс и результат.
+    # The room prefetcher currently supports SoundCloud only. Never send
+    # YouTube/DRM URLs to it: yt-dlp may block for a long time and leave a
+    # broken current item in the room.
+    if track.source_track_id and str(track.source).lower() in ("soundcloud", "sourceenum.soundcloud"):
+        try:
+            from app.room.manager import room_manager
+            from app.room.providers.soundcloud import soundcloud_client
+            asyncio.create_task(room_manager.prefetch_track_file(
+                track.id,
+                track.source,
+                track.source_track_id,
+                __import__("app.database.session", fromlist=["SessionLocal"]).SessionLocal,
+                soundcloud_client,
+            ))
+        except Exception as e:
+            print(f"⚠️ [router] prefetch after add failed: {e}")
+
     return {
         "id": track.id,
         "title": track.title,
@@ -397,6 +423,7 @@ async def add_room_track(
         "genre": track.genre or "",
         "order": track.order,
         "added_by_id": track.added_by_id,
+        "queue_state": getattr(track, "queue_state", "waiting_download"),
     }
 
 

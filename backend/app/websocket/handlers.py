@@ -27,6 +27,11 @@ async def handle_connection(websocket: WebSocket, room_id: int, token):
     print(f"{'='*60}")
 
     await websocket.accept()
+    try:
+        from app.realtime.room_gateway import room_gateway
+        room_gateway.bind_event_loop()
+    except Exception:
+        pass
 
     async def _close(code: int, reason: str):
         try:
@@ -286,6 +291,7 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
 
                 if track_data:
                     source_track_id = track_data.get("source_track_id") or str(track_data.get("id", ""))
+                    source = track_data.get("source") or "soundcloud"
                     track = _db.query(RoomTrack).filter(
                         RoomTrack.room_id == room_id,
                         RoomTrack.source_track_id == source_track_id,
@@ -317,7 +323,7 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
                         )
                         track = RoomTrack(
                             room_id=room_id,
-                            source=SourceEnum.SOUNDCLOUD,
+                            source=source,
                             source_track_id=source_track_id,
                             title=title,
                             artist=artist,
@@ -353,6 +359,7 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
                     "thumbnail": track.thumbnail or "",
                     "genre": track.genre or "",
                     "source_track_id": source_track_id,
+                    "source": str(track.source.value if hasattr(track.source, "value") else track.source),
                     "track_count": track_count,
                 }
             finally:
@@ -364,14 +371,14 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
             print(f"Track not found: {track_data or track_id_req}")
             return
 
-        if result["source_track_id"]:
+        if result["source_track_id"] and result.get("source", "").lower() == "soundcloud":
             try:
                 from app.room.manager import room_manager
                 from app.room.providers.soundcloud import soundcloud_client
                 asyncio.create_task(
                     room_manager.prefetch_track_file(
                         result["id"],
-                        result.get("source", "soundcloud"),
+                        "soundcloud",
                         result["source_track_id"],
                         SessionLocal,
                         soundcloud_client,
@@ -415,16 +422,26 @@ async def handle_track_change(websocket: WebSocket, room_id: int, user, data: di
 
 async def handle_playback_ended(room_id: int, user, data: dict) -> None:
     """
-    Handle client notification that the current track has ended.
-    The notification is only a hint: the server remains authoritative and advances
-    only when its own expected end time has elapsed.
+    Advance when a client reports that the current audio element has ended.
+
+    The reported queue item must still be the room's current item. This rejects
+    stale ``ended`` events emitted after a track was manually changed, while not
+    relying on metadata duration which may differ from the actual media length.
     """
     try:
-        from app.playback.controller import playback_tick
-        await asyncio.to_thread(playback_tick, room_id)
-    except Exception as exc:
-        print(f"❌ [ENDED] Room {room_id}: playback tick error: {exc}")
+        reported_track_id = int(data.get("track_id"))
+    except (TypeError, ValueError):
         return
+
+    try:
+        from app.playback.controller import advance_playback
+        await asyncio.to_thread(
+            advance_playback,
+            room_id,
+            expected_current_id=reported_track_id,
+        )
+    except Exception as exc:
+        print(f"❌ [ENDED] Room {room_id}: advance error: {exc}")
 
 
 async def handle_playback_control(websocket: WebSocket, room_id: int, user, data: dict) -> None:

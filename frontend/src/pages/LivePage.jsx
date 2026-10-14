@@ -49,6 +49,7 @@ export default function LivePage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [addingTrackId, setAddingTrackId] = useState(null);
   const [chatText, setChatText] = useState('');
   const [chatMessages, setChatMessages] = useState([]);
   const wsRef = useRef(null);
@@ -144,15 +145,15 @@ export default function LivePage() {
   }
 
   function getTrackQueueStatus(track) {
-    const trackStatus = String(track?.download_status || track?.status || '').toLowerCase();
-    const streamUrl = String(track?.stream_url || '').trim();
-    const isDownloading = trackStatus
-      ? ['pending', 'generating', 'downloading', 'queued'].includes(trackStatus)
-      : (!streamUrl || streamUrl === 'pending://local-upload');
+    const queueState = String(track?.queue_state || '').toLowerCase();
+    const assetStatus = String(track?.asset_status || '').toLowerCase();
+    const state = queueState || assetStatus;
+    const isDownloading = ['waiting_download', 'processing', 'pending', 'generating', 'downloading', 'queued'].includes(state);
+    const isFailed = ['failed', 'error'].includes(state);
 
     return {
-      key: isDownloading ? 'downloading' : 'ready',
-      label: isDownloading ? 'Скачивается' : 'Готово',
+      key: isFailed ? 'failed' : (isDownloading ? 'downloading' : 'ready'),
+      label: isFailed ? 'Ошибка загрузки' : (isDownloading ? 'Скачивается' : 'Готово'),
     };
   }
 
@@ -184,6 +185,7 @@ export default function LivePage() {
     const existingIdx = queue.findIndex((item) => Number(item.id) === trackId);
 
     if (existingIdx >= 0) {
+      showToast('Трек уже в очереди — перемещаю его в конец', '');
       const nextQueue = [
         ...queue.slice(0, existingIdx),
         ...queue.slice(existingIdx + 1),
@@ -198,6 +200,8 @@ export default function LivePage() {
     }
 
     const payload = buildRoomTrackPayload(track);
+    setAddingTrackId(trackId);
+    showToast('Добавляю трек в очередь…', '');
     try {
       const res = await fetch(`/rooms/${selectedRoomId}/tracks`, {
         method: 'POST',
@@ -211,12 +215,15 @@ export default function LivePage() {
         return;
       }
 
+      showToast('Трек добавлен. Началась загрузка аудио…', '');
       await loadQueue(selectedRoomId);
       if (searchQuery.trim()) {
         setSearchResults((prev) => prev.filter((item) => Number(item.id) !== trackId));
       }
     } catch {
       showToast('Ошибка сети', 'error');
+    } finally {
+      setAddingTrackId(null);
     }
   }
 
@@ -370,6 +377,18 @@ export default function LivePage() {
           // Фоллбэк: HTTP запрос очереди
           loadQueue(selectedRoomId);
         }
+      }
+
+      if (msg.type === 'queue_item_updated') {
+        const item = payload?.track_id;
+        const state = String(payload?.queue_state || '').toLowerCase();
+        setQueue((prev) => prev.map((track) => (
+          Number(track.id) === Number(item)
+            ? { ...track, queue_state: payload.queue_state }
+            : track
+        )));
+        if (state === 'ready') showToast('Трек успешно загружен и готов к воспроизведению', 'success');
+        if (state === 'failed') showToast(payload.error || 'Ошибка загрузки трека', 'error');
       }
 
       if (msg.type === 'queue_reordered' && Array.isArray(payload.queue)) {
@@ -588,6 +607,7 @@ export default function LivePage() {
   const isSearchPanelEmpty = searchQuery.trim() ? !searchResults.length : !queue.length;
   return (
     <div className="live-page live-admin-page">
+      <div id="toast-container" />
       <div className="live-admin-shell glass glass-primary">
         <header className="live-admin-header">
           <h1>Omni Player - Admin</h1>
@@ -740,19 +760,28 @@ export default function LivePage() {
                 )}
                 {!searchLoading && searchPanelItems.map((t, idx) => {
                   const shown = normalizeTrackMeta(t);
-                  const status = getTrackQueueStatus(t);
+                  const isSearchResult = Boolean(searchQuery.trim());
+                  const status = isSearchResult ? null : getTrackQueueStatus(t);
                   return (
                     <div className="live-admin-result" key={`${shown.id || shown.title}-${idx}`}>
                       <div className="meta">
                         <div className="title">{shown.title}</div>
                         <div className="artist">
                           {shown.artist || '-'}
-                          <span className={`live-admin-track-status live-admin-track-status-${status.key}`}>
-                            {status.label}
-                          </span>
+                          {!isSearchResult && status && (
+                            <span className={`live-admin-track-status live-admin-track-status-${status.key}`}>
+                              {status.label}
+                            </span>
+                          )}
                         </div>
                       </div>
-                      <button className="btn" onClick={() => addTrackToEnd(t)}>В конец очереди</button>
+                      <button
+                        className="btn"
+                        disabled={addingTrackId === Number(t.id)}
+                        onClick={() => addTrackToEnd(t)}
+                      >
+                        {addingTrackId === Number(t.id) ? 'Добавляем…' : 'В конец очереди'}
+                      </button>
                     </div>
                   );
                 })}

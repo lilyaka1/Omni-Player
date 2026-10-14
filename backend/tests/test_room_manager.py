@@ -9,11 +9,32 @@ import asyncio
 
 import pytest
 
+from app.room import manager as room_manager_module
 from app.room.manager import RoomManager
 from app.room.room_state import RoomState
 
 
 class TestRoomManager:
+    def test_usable_audio_rejects_preview_for_full_length_track(self, monkeypatch):
+        monkeypatch.setattr(room_manager_module, "_is_local_file", lambda path: True)
+        monkeypatch.setattr(
+            room_manager_module,
+            "validate_audio_file",
+            lambda path, timeout: {"ok": True, "duration": 29.75},
+        )
+
+        assert room_manager_module._is_usable_audio_file("preview.mp3", 180) is False
+
+    def test_usable_audio_accepts_duration_within_tolerance(self, monkeypatch):
+        monkeypatch.setattr(room_manager_module, "_is_local_file", lambda path: True)
+        monkeypatch.setattr(
+            room_manager_module,
+            "validate_audio_file",
+            lambda path, timeout: {"ok": True, "duration": 172},
+        )
+
+        assert room_manager_module._is_usable_audio_file("full.m4a", 180) is True
+
     def test_create_room_manager(self):
         manager = RoomManager()
 

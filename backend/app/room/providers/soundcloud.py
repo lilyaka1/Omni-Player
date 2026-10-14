@@ -341,14 +341,37 @@ class SoundCloudClient:
                 # Уже есть полный файл — только метаданные подтянем
                 info = await self.get_track_info(track_url)
                 meta = info or {}
-                return {
-                    "path": str(existing),
-                    "title": meta.get("title", filename_stem),
-                    "artist": meta.get("artist", "Unknown"),
-                    "duration": meta.get("duration", 0),
-                    "thumbnail": meta.get("thumbnail", ""),
-                    "genre": meta.get("genre", ""),
-                }
+                # A previous run may have cached a 30-second preview or an
+                # invalid AAC/M4A container. Do not keep returning it forever.
+                try:
+                    from app.room.ffmpeg import validate_audio_file
+                    validation = validate_audio_file(str(existing), timeout=15)
+                    expected = float(meta.get("duration") or 0)
+                    actual = float(validation.get("duration") or 0)
+                    tolerance = max(10.0, expected * 0.10) if expected > 45 else 0
+                    usable = validation.get("ok") and actual > 0 and (
+                        expected <= 45 or actual + tolerance >= expected
+                    )
+                except (TypeError, ValueError, OSError):
+                    usable = False
+                if not usable:
+                    print(
+                        f"⚠️ [download] discarding invalid/short cache: {existing}"
+                    )
+                    try:
+                        existing.unlink()
+                    except OSError:
+                        pass
+                    existing = None
+                else:
+                    return {
+                        "path": str(existing),
+                        "title": meta.get("title", filename_stem),
+                        "artist": meta.get("artist", "Unknown"),
+                        "duration": meta.get("duration", 0),
+                        "thumbnail": meta.get("thumbnail", ""),
+                        "genre": meta.get("genre", ""),
+                    }
 
             print(f"⬇️ [download] {track_url} → {filename_stem}.*")
             info = await asyncio.to_thread(_download_sync)
@@ -388,7 +411,10 @@ class SoundCloudClient:
             print(f"❌ [download] error: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            message = str(e).strip()
+            if any(word in message.lower() for word in ("drm", "protected", "encrypted")):
+                message = "Трек защищён DRM и не может быть загружен"
+            return {"error": message or "Не удалось скачать аудиофайл"}
 
 
 # Global client instance
